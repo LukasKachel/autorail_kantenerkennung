@@ -42,4 +42,3 @@ Each camera folder needs a `color/` folder with `color_*.png` files and a `depth
 - type a number + Enter: jump to a master frame
 - Home/End: first/last frame
 - Q/Esc: close
-# autorail_kantenerkennung
