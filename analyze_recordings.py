@@ -42,32 +42,50 @@ class CameraConfig:
     offset_seconds: float = 0.0
     depth_scale: float = DEFAULT_DEPTH_SCALE
 
+    # ROI: Region Of Interest
+    # Use a specified region of the original frame.
     roi_enabled: bool = True
     roi_x: int = 100
     roi_y: int = 100
     roi_width: int = 700
     roi_height: int = 120
 
+    # alpha value for visualization of depth image [0,1] (higher -> more contrast)
     depth_alpha: float = 0.55
+    # cutoff distance in meters. Distances outside the [min, max] range will be ignored.
     depth_cutoff_enabled: bool = True
     depth_cutoff_min_m: float = 0.2
     depth_cutoff_max_m: float = 1.0
 
+    # Canny edge detection parameters. 
+    # https://opencv24-python-tutorials.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_canny/py_canny.html#theory
     canny_min_val: int = 130
     canny_max_val: int = 150
+    # kernel size for dilating / removing edges that are created by zero-value (invalid) pixels in the depth image
+    # 1 => no dilation, 3 => dilate with a 3x3 kernel, ... (has to be an odd number)
     dilate_size: int = 1
 
+    # Paramters for houghlinesp transform
+    # https://opencv24-python-tutorials.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_houghlines/py_houghlines.html#theory
     min_line_length: int = 50
     max_line_gap: int = 20
+    # Minimum number of votes for a line to be detected. Higher means fewer detections.
     hough_threshold: int = 20
+
+    # When True, the line with the rightmost position among detected lines will be selected.
+    # Important for left or right side of the vehicle, bc the rails look different
     find_rightmost_line: bool = False
 
+    # When enabled, a median line will be calculated based on the history of detected lines in previous frames.
     median_line_enabled: bool = True
     median_line_window_size: int = 15
     median_line_min_detections: int = 8
 
+    # Reference line parameters for deviation calculation and visualization. 
+    # The reference line is defined by an offset in pixels from the center of the image and an angle in degrees.
     ref_offset_x: int = 0
     ref_angle_deg: float = 90
+    # parameters just for visualization of the reference line and info panel, not affecting the processing pipeline
     info_panel_width: int = 560
     display_depth_roi_in_full_frame: bool = True
 
