@@ -7,6 +7,15 @@ import numpy as np
 
 
 def process_depth_image(depth_image: np.ndarray, depth_alpha: float = 0.3) -> np.ndarray:
+    """Convert a depth image into a JET color map for visualization.
+
+    Args:
+        depth_image: Raw depth image.
+        depth_alpha: Scale factor used to convert depth values to 8-bit intensity.
+
+    Returns:
+        BGR color image with the OpenCV JET color map applied.
+    """
     return cv2.applyColorMap(
         cv2.convertScaleAbs(depth_image, alpha=depth_alpha),
         cv2.COLORMAP_JET,
@@ -20,6 +29,18 @@ def apply_depth_cutoff(
     max_depth_m: float = 1.0,
     enabled: bool = True,
 ) -> np.ndarray:
+    """Zero depth values outside the configured range (mind_depth_m).
+
+    Args:
+        depth_image: Raw depth image whose values use the camera's depth units.
+        depth_scale: Conversion factor from raw depth units to meters.
+        min_depth_m: Minimum allowed depth in meters.
+        max_depth_m: Maximum allowed depth in meters.
+        enabled: If false, return a copy of the input without filtering.
+
+    Returns:
+        Copy of the depth image with out-of-range non-zero values set to zero.
+    """
     cutoff_image = depth_image.copy()
     if not enabled:
         return cutoff_image
@@ -39,6 +60,17 @@ def apply_canny_edge_detection(
     max_val: int = 100,
     aperture_size: int = 3,
 ) -> np.ndarray:
+    """Run Canny edge detection on the given depth image.
+
+    Args:
+        depth_image: Image passed to OpenCV's Canny detector.
+        min_val: Lower hysteresis threshold.
+        max_val: Upper hysteresis threshold.
+        aperture_size: Sobel kernel size used by Canny.
+
+    Returns:
+        Binary edge image produced by Canny.
+    """
     return cv2.Canny(
         image=depth_image,
         threshold1=min_val,
@@ -52,6 +84,16 @@ def filter_out_zero_boundaries(
     depth_image: np.ndarray,
     dilate_size: int = 3,
 ) -> np.ndarray:
+    """Remove edges that touch zero-depth regions after mask dilation.
+
+    Args:
+        canny_edges: Binary edge image to filter.
+        depth_image: Depth image used to identify invalid zero-depth pixels.
+        dilate_size: Width and height of the square dilation kernel.
+
+    Returns:
+        Edge image with edges near zero-depth regions masked out.
+    """
     zero_mask = (depth_image == 0).astype(np.uint8) * 255
     kernel = np.ones((dilate_size, dilate_size), np.uint8)
     dilated_zero_mask = cv2.dilate(zero_mask, kernel, iterations=1)
@@ -66,6 +108,18 @@ def find_longest_line_right(
     threshold: int = 50,
     right: bool = True,
 ) -> tuple[int, int, int, int] | None:
+    """Find the rightmost or leftmost line among the longest Hough candidates.
+
+    Args:
+        edge_img: Binary edge image used as input for probabilistic Hough lines.
+        min_line_length: Minimum accepted line length in pixels.
+        max_line_gap: Maximum gap in pixels that can connect line segments.
+        threshold: Minimum number of votes required for a line.
+        right: If true, select the rightmost candidate; otherwise select the leftmost.
+
+    Returns:
+        Detected line as ``(x1, y1, x2, y2)``, or ``None`` if no line was found.
+    """
     hough_lines = cv2.HoughLinesP(
         image=edge_img,
         rho=1,
@@ -101,6 +155,20 @@ def draw_long_line(
     color: tuple[int, int, int] | None = None,
     thickness: int | None = None,
 ) -> np.ndarray:
+    """Draw the detected line extended across the image.
+
+    Args:
+        image: Image to draw on. This array is modified in place.
+        x1: First line endpoint x-coordinate.
+        y1: First line endpoint y-coordinate.
+        x2: Second line endpoint x-coordinate.
+        y2: Second line endpoint y-coordinate.
+        color: Optional BGR line color. Defaults depend on line orientation.
+        thickness: Optional line thickness in pixels.
+
+    Returns:
+        The same image array with the extended line drawn on it.
+    """
     if x2 != x1:
         m = (y2 - y1) / (x2 - x1)
         b = y1 - m * x1
@@ -133,6 +201,19 @@ def calculate_median_line(
     window_size: int = 15,
     min_detections: int = 8,
 ) -> tuple[int, int, int, int] | None:
+    """Compute a median full-height line from recent detections.
+
+    Args:
+        line_history: Recent line detections, with ``None`` for missing detections.
+        image_width: Width of the image the returned line belongs to.
+        image_height: Height of the image the returned line belongs to.
+        window_size: Required history length before a median line is calculated.
+        min_detections: Minimum number of valid lines required in the history.
+
+    Returns:
+        Median line as ``(top_x, 0, bottom_x, image_height - 1)``, or ``None`` if
+        the history is too short or has too few valid detections.
+    """
     if len(line_history) < window_size or image_width <= 0 or image_height <= 0:
         return None
 
@@ -168,6 +249,16 @@ def draw_reference_line(
     offset_x: int = 0,
     angle_deg: float = 90,
 ) -> np.ndarray:
+    """Draw a magenta reference line through the image center with an x offset.
+
+    Args:
+        image: Image to draw on. This array is modified in place.
+        offset_x: Horizontal offset from the image center in pixels.
+        angle_deg: Reference line angle in degrees, where 90 is vertical.
+
+    Returns:
+        The same image array with the reference line drawn on it.
+    """
     img_height, img_width = image.shape[:2]
     ref_x = img_width // 2 + offset_x
     ref_y = img_height // 2
@@ -192,6 +283,20 @@ def calculate_line_deviation(
     ref_x_offset: int = 0,
     ref_angle_deg: float = 90,
 ) -> tuple[float | None, float | None, float | None]:
+    """Calculate line angle, horizontal pixel, and depth deviations.
+
+    Args:
+        longest_line: Detected line as ``(x1, y1, x2, y2)``, or ``None``.
+        depth_image: Depth image used to sample depth at the image center row.
+        ref_x_offset: Horizontal reference offset from the image center in pixels.
+        ref_angle_deg: Reference line angle in degrees, where 90 is vertical.
+
+    Returns:
+        Tuple of ``(angle_deviation, horizontal_deviation, depth_at_center)``.
+        Horizontal deviation and depth are ``None`` if the center-row line point
+        is outside the image or has no valid nearby depth. All values are
+        ``None`` if no line was provided.
+    """
     if longest_line is None:
         return None, None, None
 
@@ -226,6 +331,16 @@ def calculate_pixel_area(
     theta_horizontal: float,
     theta_vertical: float,
 ) -> tuple[float, float, float]:
+    """Calculate physical pixel width, height, and area at the given depth.
+
+    Args:
+        depth_in_mm: Depth from the camera in millimeters.
+        theta_horizontal: Horizontal angular size of one pixel in degrees.
+        theta_vertical: Vertical angular size of one pixel in degrees.
+
+    Returns:
+        Tuple of ``(pixel_width, pixel_height, pixel_area)`` in millimeter units.
+    """
     theta_h_rad = math.radians(theta_horizontal / 2)
     theta_v_rad = math.radians(theta_vertical / 2)
     pixel_width = 2 * depth_in_mm * math.tan(theta_h_rad)
@@ -240,6 +355,18 @@ def _calculate_line_angle_deviation(
     y2: float,
     ref_angle_deg: float = 90,
 ) -> float:
+    """Return signed line-angle deviation from the reference angle.
+
+    Args:
+        x1: First line endpoint x-coordinate.
+        y1: First line endpoint y-coordinate.
+        x2: Second line endpoint x-coordinate.
+        y2: Second line endpoint y-coordinate.
+        ref_angle_deg: Reference line angle in degrees, where 90 is vertical.
+
+    Returns:
+        Signed angular deviation in degrees, normalized to the ``[-90, 90]`` range.
+    """
     if x2 != x1:
         dx = x2 - x1
         dy = y2 - y1
@@ -264,6 +391,16 @@ def _find_min_depth_in_region(
     center_x: int,
     center_y: int,
 ) -> float:
+    """Find the smallest non-zero depth in the 3x3 region around a pixel.
+
+    Args:
+        depth_image: Depth image to sample.
+        center_x: Center pixel x-coordinate.
+        center_y: Center pixel y-coordinate.
+
+    Returns:
+        Minimum non-zero depth in the 3x3 neighborhood, or ``0.0`` if none exists.
+    """
     height, width = depth_image.shape
     min_depth = depth_image[center_y, center_x]
     if min_depth == 0:
