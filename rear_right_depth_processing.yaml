@@ -1,0 +1,38 @@
+processing_config:
+  camera:
+    img_width: 848
+    img_height: 480
+    fps: 15.0
+    hfov: 87
+    vfov: 58
+    depth_scale: 0.0010000000474974513
+  processing:
+    depth_alpha: 0.55
+  depth_cutoff:
+    enabled: true
+    min_depth_m: 0.2
+    max_depth_m: 1.0
+  edge_detection:
+    canny_min_val: 130
+    canny_max_val: 150
+    dilation_size: 1
+    min_line_length: 50
+    max_line_gap: 20
+    hough_threshold: 20
+    right: true
+  median_line:
+    enabled: true
+    window_size: 15
+    min_detections: 8
+  reference_line:
+    offset_x: -10
+    angle_deg: 90
+  roi:
+    enabled: true
+    x: 100
+    y: 190
+    width: 700
+    height: 120
+
+sensors:
+  - name: Rear right
