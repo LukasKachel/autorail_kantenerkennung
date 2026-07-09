@@ -35,7 +35,7 @@ THETA_VERTICAL = VFOV / IMG_HEIGHT
 DEFAULT_DEPTH_SCALE = 0.0010000000474974513
 
 
-@dataclass(frozen=True)
+@dataclass
 class CameraConfig:
     label: str
     folder: str
@@ -88,6 +88,308 @@ class CameraConfig:
     # parameters just for visualization of the reference line and info panel, not affecting the processing pipeline
     info_panel_width: int = 560
     display_depth_roi_in_full_frame: bool = True
+
+
+from typing import Callable
+
+# ------------------------------------------------------------------
+# Parameter definitions for the config panel
+# ------------------------------------------------------------------
+@dataclass
+class ParamDef:
+    """Definition of a single tunable parameter for the config panel."""
+    group: str        # section header (e.g. "Depth", "Canny")
+    label: str        # display label
+    attr: str         # attribute name on CameraConfig
+    kind: str         # 'int', 'float', 'bool'
+    vmin: float       # slider minimum
+    vmax: float       # slider maximum
+    step: float       # fine-step for +/- buttons
+    fmt: str          # format string (e.g. "{:.2f} m")
+
+
+CONFIG_PARAMS: list[ParamDef] = [
+    # ---- Depth ----
+    ParamDef("Depth",     "Alpha",        "depth_alpha",           "float", 0.0, 1.0, 0.01, "{:.2f}"),
+    ParamDef("Depth",     "Cutoff On",    "depth_cutoff_enabled", "bool",  0,   1,   1,    "{}"),
+    ParamDef("Depth",     "Cutoff Min",   "depth_cutoff_min_m",   "float", 0.0, 5.0, 0.01, "{:.2f} m"),
+    ParamDef("Depth",     "Cutoff Max",   "depth_cutoff_max_m",   "float", 0.0, 5.0, 0.01, "{:.2f} m"),
+    # ---- Canny ----
+    ParamDef("Canny",     "Min Val",      "canny_min_val",        "int",   0,   500, 1,    "{}"),
+    ParamDef("Canny",     "Max Val",      "canny_max_val",        "int",   0,   500, 1,    "{}"),
+    ParamDef("Canny",     "Dilate",       "dilate_size",          "int",   1,   21,  1,    "{}"),
+    # ---- Hough ----
+    ParamDef("Hough",     "Threshold",    "hough_threshold",      "int",   0,   200, 1,    "{}"),
+    ParamDef("Hough",     "Min Length",   "min_line_length",      "int",   0,   800, 1,    "{} px"),
+    ParamDef("Hough",     "Max Gap",      "max_line_gap",         "int",   0,   200, 1,    "{} px"),
+    # ---- Line ----
+    ParamDef("Line",      "Rightmost",    "find_rightmost_line",  "bool",  0,   1,   1,    "{}"),
+    ParamDef("Line",      "Median",       "median_line_enabled",  "bool",  0,   1,   1,    "{}"),
+    ParamDef("Line",      "Ref Offset",   "ref_offset_x",         "int",   -200, 200, 1,  "{} px"),
+    ParamDef("Line",      "Ref Angle",    "ref_angle_deg",        "int",   0,   180, 1,    "{:.0f} deg"),
+    # ---- ROI ----
+    ParamDef("ROI",       "ROI On",       "roi_enabled",          "bool",  0,   1,   1,    "{}"),
+    ParamDef("ROI",       "ROI X",        "roi_x",                "int",   0,   848, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Y",        "roi_y",                "int",   0,   480, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Width",    "roi_width",            "int",   10,  848, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Height",   "roi_height",           "int",   10,  480, 1,    "{} px"),
+]
+
+
+class ConfigPanel:
+    """Custom-drawn OpenCV window with labelled sliders for real-time tuning.
+
+    Uses mouse click-and-drag on slider bars plus +/- click zones for fine
+    adjustment.  No trackbars – everything is rendered with cv2 primitives.
+    """
+
+    WIDTH = 660
+    ROW_H = 26
+    HEADER_H = 32
+    MARGIN_L = 10
+    LABEL_W = 138
+    SLIDER_W = 320
+    SLIDER_H = 16
+    GAP = 6
+    SLIDER_Y_OFF = 5   # vertical offset of slider bar inside the row
+    BTN_W = 16         # width of +/- buttons
+
+    def __init__(self, window_name: str, dirty_callback: Callable[[], None] | None = None):
+        self.window_name = window_name
+        self.selected_camera = 0
+        self._dirty_callback = dirty_callback
+        self._dragging: int | None = None  # row index currently being dragged
+        self._rows: list[dict] = []        # row layout info: {y, is_header, param?}
+        self._canvas_h = 800
+
+    @property
+    def config(self) -> CameraConfig:
+        return CAMERA_CONFIGS[CAMERA_ORDER[self.selected_camera]]
+
+    # -- value helpers ---------------------------------------------------
+
+    def _get(self, p: ParamDef) -> float:
+        return float(getattr(self.config, p.attr))
+
+    def _set(self, p: ParamDef, value: float) -> None:
+        if p.kind == "bool":
+            setattr(self.config, p.attr, value >= 0.5)
+        elif p.kind == "int":
+            setattr(self.config, p.attr, int(round(value)))
+        else:
+            setattr(self.config, p.attr, value)
+        if self._dirty_callback:
+            self._dirty_callback()
+
+    # -- coordinate mapping ----------------------------------------------
+
+    def _slider_left(self) -> int:
+        return self.MARGIN_L + self.LABEL_W + self.GAP + self.BTN_W
+
+    def _to_frac(self, p: ParamDef) -> float:
+        denom = p.vmax - p.vmin
+        return (self._get(p) - p.vmin) / denom if denom != 0 else 0.5
+
+    def _x_to_val(self, p: ParamDef, mx: int) -> float:
+        rel = mx - self._slider_left()
+        frac = max(0.0, min(1.0, rel / self.SLIDER_W))
+        return p.vmin + frac * (p.vmax - p.vmin)
+
+    # -- row hit-testing -------------------------------------------------
+
+    def _hit_row(self, my: int) -> int | None:
+        """Return row index under the mouse y, or None."""
+        for idx, r in enumerate(self._rows):
+            if r["is_header"]:
+                continue
+            ry = r["y"]
+            if ry <= my < ry + self.ROW_H:
+                return idx
+        return None
+
+    def _hit_camera_btn(self, mx: int, my: int) -> int | None:
+        """Return camera index (0-3) if a camera button was clicked."""
+        btn_y = 44
+        btn_h = 24
+        if not (btn_y <= my < btn_y + btn_h):
+            return None
+        total_gap = (4 - 1) * 6
+        btn_w = (self.WIDTH - self.MARGIN_L * 2 - total_gap) // 4
+        for i in range(4):
+            bx = self.MARGIN_L + i * (btn_w + 6)
+            if bx <= mx < bx + btn_w:
+                return i
+        return None
+
+    # -- mouse callback --------------------------------------------------
+
+    def _on_mouse(self, event: int, x: int, y: int, flags: int, _param: object) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Camera selector buttons?
+            cam = self._hit_camera_btn(x, y)
+            if cam is not None and cam != self.selected_camera:
+                self.selected_camera = cam
+                self.render()
+                if self._dirty_callback:
+                    self._dirty_callback()
+                return
+
+            row = self._hit_row(y)
+            if row is not None:
+                p = self._rows[row]["param"]
+                sx = self._slider_left()
+                # +/- button zones
+                if sx - self.BTN_W <= x < sx:
+                    self._set(p, max(p.vmin, self._get(p) - p.step))
+                elif sx + self.SLIDER_W <= x < sx + self.SLIDER_W + self.BTN_W:
+                    self._set(p, min(p.vmax, self._get(p) + p.step))
+                else:
+                    self._set(p, self._x_to_val(p, x))
+                    self._dragging = row
+                self.render()
+
+        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+            if self._dragging is not None:
+                p = self._rows[self._dragging]["param"]
+                self._set(p, self._x_to_val(p, x))
+                self.render()
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self._dragging = None
+
+    # -- render ----------------------------------------------------------
+
+    def render(self) -> None:
+        W = self.WIDTH
+        canvas = np.full((self._canvas_h, W, 3), 32, dtype=np.uint8)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        y = 8
+        self._rows.clear()
+
+        # -- title bar ---------------------------------------------------
+        cv2.putText(canvas, f"Config - {CAMERA_ORDER[self.selected_camera]}",
+                    (self.MARGIN_L, y + 22), font, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+        y += 26
+
+        # -- camera selector buttons -------------------------------------
+        btn_y = y + 6
+        total_gap = (4 - 1) * 6
+        btn_w = (W - self.MARGIN_L * 2 - total_gap) // 4
+        btn_h = 24
+        for i, ck in enumerate(CAMERA_ORDER):
+            bx = self.MARGIN_L + i * (btn_w + 6)
+            fill = (70, 150, 70) if i == self.selected_camera else (55, 55, 55)
+            border = (100, 200, 100) if i == self.selected_camera else (75, 75, 75)
+            cv2.rectangle(canvas, (bx, btn_y), (bx + btn_w, btn_y + btn_h), fill, -1)
+            cv2.rectangle(canvas, (bx, btn_y), (bx + btn_w, btn_y + btn_h), border, 1)
+            short = ck.replace("_", " ").title()[:12]
+            cv2.putText(canvas, short, (bx + 6, btn_y + 17), font, 0.42,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+        y = btn_y + btn_h + 14
+
+        # -- parameter sections ------------------------------------------
+        current_group: str | None = None
+        for pdef in CONFIG_PARAMS:
+            # Section header
+            if pdef.group != current_group:
+                current_group = pdef.group
+                cv2.rectangle(canvas, (6, y), (W - 6, y + self.HEADER_H), (42, 42, 48), -1)
+                cv2.putText(canvas, f"-- {pdef.group} --",
+                            (self.MARGIN_L + 4, y + 23), font, 0.55, (160, 190, 240), 2, cv2.LINE_AA)
+                self._rows.append({"y": y, "is_header": True, "group": pdef.group})
+                y += self.HEADER_H + 2
+
+            row_y = y
+            self._rows.append({"y": row_y, "is_header": False, "param": pdef})
+
+            # alternating row background
+            bg = (40, 40, 40) if len(self._rows) % 2 == 0 else (35, 35, 35)
+            cv2.rectangle(canvas, (6, row_y), (W - 6, row_y + self.ROW_H), bg, -1)
+
+            # label
+            cv2.putText(canvas, pdef.label, (self.MARGIN_L, row_y + 19),
+                        font, 0.52, (215, 215, 215), 1, cv2.LINE_AA)
+
+            sx = self._slider_left()
+            sy = row_y + self.SLIDER_Y_OFF
+
+            # slider track
+            cv2.rectangle(canvas, (sx, sy), (sx + self.SLIDER_W, sy + self.SLIDER_H),
+                          (65, 65, 65), -1)
+            cv2.rectangle(canvas, (sx, sy), (sx + self.SLIDER_W, sy + self.SLIDER_H),
+                          (48, 48, 48), 1)
+
+            # filled portion
+            frac = self._to_frac(pdef)
+            fill_w = int(frac * self.SLIDER_W)
+            if fill_w > 0:
+                c = (55, 135, 210) if pdef.kind != "bool" else (55, 175, 95)
+                cv2.rectangle(canvas, (sx, sy), (sx + fill_w, sy + self.SLIDER_H), c, -1)
+
+            # thumb
+            tx = sx + fill_w - 2
+            cv2.rectangle(canvas, (max(sx - 1, tx), sy - 1),
+                          (min(sx + self.SLIDER_W + 1, tx + 5), sy + self.SLIDER_H + 1),
+                          (240, 240, 240), 2)
+
+            # +/- buttons
+            cv2.rectangle(canvas, (sx - self.BTN_W, sy),
+                          (sx, sy + self.SLIDER_H), (52, 52, 52), -1)
+            cv2.putText(canvas, "-", (sx - self.BTN_W + 4, sy + 13),
+                        font, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
+            cv2.rectangle(canvas, (sx + self.SLIDER_W, sy),
+                          (sx + self.SLIDER_W + self.BTN_W, sy + self.SLIDER_H), (52, 52, 52), -1)
+            cv2.putText(canvas, "+", (sx + self.SLIDER_W + 4, sy + 13),
+                        font, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
+
+            # value display
+            val = self._get(pdef)
+            vx = sx + self.SLIDER_W + self.BTN_W + 12
+            if pdef.kind == "bool":
+                txt = "ON" if val >= 0.5 else "OFF"
+                vc = (110, 240, 110) if val >= 0.5 else (240, 110, 110)
+            elif pdef.kind == "float":
+                txt = pdef.fmt.format(val)
+                vc = (195, 225, 255)
+            else:
+                txt = pdef.fmt.format(int(val))
+                vc = (195, 225, 255)
+            cv2.putText(canvas, txt, (vx, row_y + 19), font, 0.50, vc, 1, cv2.LINE_AA)
+
+            y += self.ROW_H
+
+        # -- footer ------------------------------------------------------
+        footer_y = y + 8
+        needed_h = max(footer_y + 40, 800)
+        if canvas.shape[0] < needed_h:
+            pad = np.full((needed_h - canvas.shape[0], W, 3), 32, dtype=np.uint8)
+            canvas = np.vstack((canvas, pad))
+        self._canvas_h = canvas.shape[0]
+        cv2.rectangle(canvas, (0, footer_y), (W, self._canvas_h), (22, 22, 28), -1)
+        cv2.putText(canvas, "Drag sliders  |  +/- fine-tune  |  Click camera tabs  |  P=toggle  R=reset",
+                    (self.MARGIN_L, footer_y + 28), font, 0.44, (150, 150, 150), 1, cv2.LINE_AA)
+
+        cv2.imshow(self.window_name, canvas)
+
+    # -- public API ------------------------------------------------------
+
+    def open(self) -> None:
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, self.WIDTH, self._canvas_h)
+        cv2.setMouseCallback(self.window_name, self._on_mouse)
+        self.render()
+
+    def close(self) -> None:
+        try:
+            cv2.destroyWindow(self.window_name)
+        except cv2.error:
+            pass
+
+    def is_visible(self) -> bool:
+        try:
+            return cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) >= 1.0
+        except cv2.error:
+            return False
 
 
 @dataclass(frozen=True)
@@ -378,7 +680,7 @@ class RecordingAnalyzer:
         # Production edge input for comparison:
         depth_grayscale = cv2.convertScaleAbs(edge_depth, alpha=config.depth_alpha)
         canny_input = depth_grayscale
-        # canny_input = depth_colormap
+        canny_input = depth_colormap
         canny_edges = apply_canny_edge_detection(
             canny_input,
             min_val=config.canny_min_val,
@@ -650,6 +952,9 @@ class RecordingAnalyzer:
         )
         return vstack_padded([header, body], gap=0)
 
+    # ------------------------------------------------------------------
+    # Main keyboard viewer
+    # ------------------------------------------------------------------
     def run_opencv_keyboard_viewer(
         self,
         start_frame: int = 0,
@@ -663,6 +968,13 @@ class RecordingAnalyzer:
             "frame": int(np.clip(start_frame, 0, max_frame)),
             "dirty": True,
             "typed": "",
+        }
+
+        # Snapshot original config values so the user can reset with 'r'.
+        import dataclasses as _dc
+        _original_configs: dict[str, dict[str, object]] = {
+            ck: {f.name: getattr(cfg, f.name) for f in _dc.fields(CameraConfig)}
+            for ck, cfg in CAMERA_CONFIGS.items()
         }
 
         def clamp_frame(value: int) -> int:
@@ -683,10 +995,20 @@ class RecordingAnalyzer:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.createTrackbar("master_frame", window_name, state["frame"], max_frame, on_trackbar)
 
+        # ---- Config panel ----
+        config_panel = ConfigPanel("Config Panel", dirty_callback=lambda: state.update(dirty=True))
+        config_visible = True
+        config_panel.open()
+        # -----------------------
+
         last_image = None
         window_size_initialized = False
         try:
             while True:
+                # Recreate config window if it was closed externally.
+                if config_visible and not config_panel.is_visible():
+                    config_panel.open()
+
                 if state["dirty"] or last_image is None:
                     target_time = self.master_time_for_frame(state["frame"], offsets)
                     overview = self.render_overview_frame(target_time, offsets)
@@ -747,8 +1069,24 @@ class RecordingAnalyzer:
                 elif ascii_key == ord("c"):
                     state["typed"] = ""
                     state["dirty"] = True
+                elif ascii_key == ord("p"):
+                    # Toggle config panel.
+                    config_visible = not config_visible
+                    if config_visible:
+                        config_panel.open()
+                    else:
+                        config_panel.close()
+                elif ascii_key == ord("r"):
+                    # Reset all configs to their original values.
+                    for ck, cfg in CAMERA_CONFIGS.items():
+                        saved = _original_configs[ck]
+                        for fname, fval in saved.items():
+                            setattr(cfg, fname, fval)
+                    config_panel.render()
+                    state["dirty"] = True
         finally:
             cv2.destroyWindow(window_name)
+            config_panel.close()
 
 
 def pad_to_height(
