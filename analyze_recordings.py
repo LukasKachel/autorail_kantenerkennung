@@ -375,8 +375,12 @@ class RecordingAnalyzer:
             enabled=config.depth_cutoff_enabled,
         )
         depth_colormap = process_depth_image(edge_depth, depth_alpha=config.depth_alpha)
+        # Production edge input for comparison:
+        depth_grayscale = cv2.convertScaleAbs(edge_depth, alpha=config.depth_alpha)
+        canny_input = depth_grayscale
+        # canny_input = depth_colormap
         canny_edges = apply_canny_edge_detection(
-            depth_colormap,
+            canny_input,
             min_val=config.canny_min_val,
             max_val=config.canny_max_val,
         )

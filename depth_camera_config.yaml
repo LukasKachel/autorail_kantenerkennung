@@ -1,0 +1,76 @@
+depth_camera:
+  enabled: true
+  
+  connection:
+    type: "usb"
+    timeout: 1.0              # Frame wait timeout in seconds (converted from 1000ms)
+    # No poll_interval - event-driven via RealSense SDK frame callbacks (wait_for_frames)
+
+  specific_config:
+    init_retry_interval_s: 0.1
+    error_throttle_duration_s: 5.0
+    shutdown_join_timeout_s: 2.0
+  
+  processing_config:
+    camera:
+      img_width: 848
+      img_height: 480
+      fps: 15
+      hfov: 87
+      vfov: 58
+    processing:
+      depth_alpha: 0.55
+    depth_cutoff:
+      enabled: true
+      min_m: 0.2
+      max_m: 1.0
+    roi:
+      enabled: true
+      x: 80
+      y: 50
+      width: 750
+      height: 300
+    edge_detection:
+      canny_min_val: 130
+      canny_max_val: 150
+      dilation_size: 1
+      min_line_length: 150
+      max_line_gap: 40
+      hough_threshold: 20
+    line_selection:
+      find_rightmost_line: true
+    reference_line:
+      offset_x: -19
+      angle_deg: 90
+    median_line:
+      enabled: true
+      window_size: 15
+      min_detections: 8
+    use_debug_profile: false
+    debugging:
+      save_frames: true
+      show_windows: true
+      calculate_center_depth: true
+      calculate_pixel_area: true
+      display_filtered_edges: true
+      print_debug_info: true
+    deployment:
+      save_frames: true
+      show_windows: false
+      calculate_center_depth: false
+      calculate_pixel_area: false
+      display_filtered_edges: false
+      print_debug_info: false
+  
+  # sensors:
+  #  #- name: "depth_front_right"
+  #  #   serial_number: "247122074289"
+  #   - name: "depth_front_left"
+  #     serial_number: "247122073821"
+  #     usb_serial: "338243020874"
+  #   - name: "depth_rear_right"
+  #     serial_number: "247122074296"
+  #     usb_serial: "338243020979"
+  #   - name: "depth_rear_left"
+  #     serial_number: "250122077872"
+  #     usb_serial: "338243021314"
