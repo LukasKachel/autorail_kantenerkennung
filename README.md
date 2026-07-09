@@ -35,7 +35,7 @@ depth_rear_right/
 
 Each camera folder needs a `color/` folder with `color_*.png` files and a `depth/` folder with `depth_*.png` files.
 
-## Controls
+### Controls
 
 - Left/Right or A/D: move one frame
 - Up/Down or W/S: move ten frames
