@@ -838,6 +838,11 @@ class RecordingAnalyzer:
         h, w = depth_work.shape[:2]
         center_x, center_y = w // 2, h // 2
         center_depth = int(depth_work[center_y, center_x])
+        total_pixels = int(depth_work.size)
+        valid_pixels = int(np.count_nonzero(depth_work))
+        confidence_percent = (
+            100.0 * valid_pixels / total_pixels if total_pixels else 0.0
+        )
         cv2.circle(result_img, (center_x, center_y), radius=3, color=current_color, thickness=-1)
         _, _, center_pixel_area = calculate_pixel_area(
             depth_in_mm=center_depth,
@@ -860,6 +865,11 @@ class RecordingAnalyzer:
             (f"Delta {delta_ms:+.1f} ms   Offset {offsets.get(camera_key, 0.0):+.3f}s", dim_color),
             (f"Center depth {center_depth} mm", current_text_color),
             (f"Pixel area {center_pixel_area:.2f} mm^2", current_text_color),
+            (
+                f"Confidence {confidence_percent:.1f}% "
+                f"({valid_pixels}/{total_pixels} valid)",
+                current_text_color,
+            ),
         ]
 
         config_lines = [
