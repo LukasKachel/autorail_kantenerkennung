@@ -63,7 +63,7 @@ class CameraConfig:
     canny_max_val: int = 150
     # kernel size for dilating / removing edges that are created by zero-value (invalid) pixels in the depth image
     # 1 => no dilation, 3 => dilate with a 3x3 kernel, ... (has to be an odd number)
-    dilate_size: int = 1
+    dilate_size: int = 3
 
     # Paramters for houghlinesp transform
     # https://opencv24-python-tutorials.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_houghlines/py_houghlines.html#theory
