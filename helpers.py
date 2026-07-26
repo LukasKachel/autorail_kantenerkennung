@@ -29,7 +29,7 @@ def apply_depth_cutoff(
     max_depth_m: float = 1.0,
     enabled: bool = True,
 ) -> np.ndarray:
-    """Zero depth values outside the configured range (mind_depth_m).
+    """Zero out depth values outside the configured range (min_depth_m).
 
     Args:
         depth_image: Raw depth image whose values use the camera's depth units.
@@ -39,7 +39,7 @@ def apply_depth_cutoff(
         enabled: If false, return a copy of the input without filtering.
 
     Returns:
-        Copy of the depth image with out-of-range non-zero values set to zero.
+        A copy of the depth image with out-of-range non-zero values set to zero.
     """
     cutoff_image = depth_image.copy()
     if not enabled:
@@ -135,14 +135,16 @@ def find_longest_line_right(
     for line in hough_lines:
         x1, y1, x2, y2 = line[0]
         line_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        lines_with_length.append((line_length, (int(x1), int(y1), int(x2), int(y2))))
+        lines_with_length.append(
+            (line_length, (int(x1), int(y1), int(x2), int(y2))))
 
     longest_candidates = sorted(lines_with_length, reverse=True)[:4]
     if not longest_candidates:
         return None
 
-    key = lambda item: (item[1][0] + item[1][2]) / 2
-    selected = max(longest_candidates, key=key) if right else min(longest_candidates, key=key)
+    def key(item): return (item[1][0] + item[1][2]) / 2
+    selected = max(longest_candidates, key=key) if right else min(
+        longest_candidates, key=key)
     return selected[1]
 
 
@@ -240,7 +242,8 @@ def calculate_median_line(
     median_center_x = float(np.median(center_x_values))
     median_dx_dy = float(np.median(dx_dy_values))
     top_x = int(round(median_center_x - center_y * median_dx_dy))
-    bottom_x = int(round(median_center_x + (image_height - 1 - center_y) * median_dx_dy))
+    bottom_x = int(
+        round(median_center_x + (image_height - 1 - center_y) * median_dx_dy))
     return top_x, 0, bottom_x, image_height - 1
 
 
@@ -311,7 +314,8 @@ def calculate_line_deviation(
     if x2 != x1:
         m = (y2 - y1) / (x2 - x1)
         b = y1 - m * x1
-        detected_x_at_center_y = int((reference_y_at_center - b) / m) if m != 0 else x1
+        detected_x_at_center_y = int(
+            (reference_y_at_center - b) / m) if m != 0 else x1
     else:
         detected_x_at_center_y = x1
 
@@ -416,3 +420,67 @@ def _find_min_depth_in_region(
                     min_depth = depth
 
     return 0.0 if min_depth == np.inf else float(min_depth)
+
+
+def _line_x_at_y(line, y):
+    """Return the x-position of the line at given y."""
+    x1, y1, x2, y2 = line
+    if y2 == y1:
+        return (x1 + x2) / 2.0
+    return x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+
+
+def calculate_pixel_validity_score(edge_depth):
+    """Compute the share of valid pixels in the depth image (after apply_depth_cutoff).
+
+    Returns:
+        A tuple of (score in percent, valid_pixels, total_pixels).
+    """
+    total_pixels = edge_depth.size
+    if total_pixels == 0:
+        return 0.0, 0, 0
+    valid_pixels = int(np.count_nonzero(edge_depth))
+    score = 100.0 * valid_pixels / total_pixels
+    return score, valid_pixels, total_pixels
+
+
+def calculate_temporal_line_score(
+    current_line,
+    median_line,
+    image_height,
+):
+    """Compare the currently detected line with the median line.
+
+    Returns:
+        A tuple of (score in percent, center_x_diff in px, angle_diff in deg).
+        The score is 0.0 if either line is missing (warm-up phase).
+    """
+    if current_line is None or median_line is None:
+        return 0.0, None, None
+
+    center_y = (image_height - 1) / 2.0
+
+    center_x_current = _line_x_at_y(current_line, center_y)
+    center_x_median = _line_x_at_y(median_line, center_y)
+    center_x_diff = abs(center_x_current - center_x_median)
+
+    ang_current = _calculate_line_angle_deviation(*current_line)
+    ang_median = _calculate_line_angle_deviation(*median_line)
+    raw_angle_diff = abs(ang_current - ang_median)
+    # a line has no direction, so orientations that differ by 180 degrees are
+    # equivalent. Account for the wrap at -90/90 degrees.
+    angle_diff = min(raw_angle_diff, 180.0 - raw_angle_diff)
+
+    # Tolerances at which a difference is considered a full mismatch (score 0
+    # for that part). Smaller differences scale the score linearly.
+    max_tolerated_center_shift_px = 30.0  # horizontal shift of the line center
+    max_tolerated_angle_deviation_deg = 10.0  # tilt of the line
+
+    pixel_part = max(0.0, 1.0 - center_x_diff / max_tolerated_center_shift_px)
+    angle_part = max(
+        0.0, 1.0 - angle_diff / max_tolerated_angle_deviation_deg
+    )
+    # both parts contribute equally to the final score
+    score = 100.0 * (pixel_part + angle_part) / 2.0
+
+    return score, center_x_diff, angle_diff

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Callable
 
 import argparse
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from helpers import (
     calculate_line_deviation,
     calculate_median_line,
     calculate_pixel_area,
+    calculate_pixel_validity_score,
+    calculate_temporal_line_score,
     draw_long_line,
     draw_reference_line,
     filter_out_zero_boundaries,
@@ -57,13 +60,13 @@ class CameraConfig:
     depth_cutoff_min_m: float = 0.2
     depth_cutoff_max_m: float = 1.0
 
-    # Canny edge detection parameters. 
+    # Canny edge detection parameters.
     # https://opencv24-python-tutorials.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_canny/py_canny.html#theory
     canny_min_val: int = 130
     canny_max_val: int = 150
     # kernel size for dilating / removing edges that are created by zero-value (invalid) pixels in the depth image
     # 1 => no dilation, 3 => dilate with a 3x3 kernel, ... (has to be an odd number)
-    dilate_size: int = 3
+    dilate_size: int = 1
 
     # Paramters for houghlinesp transform
     # https://opencv24-python-tutorials.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_houghlines/py_houghlines.html#theory
@@ -81,7 +84,7 @@ class CameraConfig:
     median_line_window_size: int = 15
     median_line_min_detections: int = 8
 
-    # Reference line parameters for deviation calculation and visualization. 
+    # Reference line parameters for deviation calculation and visualization.
     # The reference line is defined by an offset in pixels from the center of the image and an angle in degrees.
     ref_offset_x: int = 0
     ref_angle_deg: float = 90
@@ -90,11 +93,10 @@ class CameraConfig:
     display_depth_roi_in_full_frame: bool = True
 
 
-from typing import Callable
-
 # ------------------------------------------------------------------
 # Parameter definitions for the config panel
 # ------------------------------------------------------------------
+
 @dataclass
 class ParamDef:
     """Definition of a single tunable parameter for the config panel."""
@@ -110,29 +112,48 @@ class ParamDef:
 
 CONFIG_PARAMS: list[ParamDef] = [
     # ---- Depth ----
-    ParamDef("Depth",     "Alpha",        "depth_alpha",           "float", 0.0, 1.0, 0.01, "{:.2f}"),
-    ParamDef("Depth",     "Cutoff On",    "depth_cutoff_enabled", "bool",  0,   1,   1,    "{}"),
-    ParamDef("Depth",     "Cutoff Min",   "depth_cutoff_min_m",   "float", 0.0, 5.0, 0.01, "{:.2f} m"),
-    ParamDef("Depth",     "Cutoff Max",   "depth_cutoff_max_m",   "float", 0.0, 5.0, 0.01, "{:.2f} m"),
+    ParamDef("Depth",     "Alpha",        "depth_alpha",
+             "float", 0.0, 1.0, 0.01, "{:.2f}"),
+    ParamDef("Depth",     "Cutoff On",    "depth_cutoff_enabled",
+             "bool",  0,   1,   1,    "{}"),
+    ParamDef("Depth",     "Cutoff Min",   "depth_cutoff_min_m",
+             "float", 0.0, 5.0, 0.01, "{:.2f} m"),
+    ParamDef("Depth",     "Cutoff Max",   "depth_cutoff_max_m",
+             "float", 0.0, 5.0, 0.01, "{:.2f} m"),
     # ---- Canny ----
-    ParamDef("Canny",     "Min Val",      "canny_min_val",        "int",   0,   500, 1,    "{}"),
-    ParamDef("Canny",     "Max Val",      "canny_max_val",        "int",   0,   500, 1,    "{}"),
-    ParamDef("Canny",     "Dilate",       "dilate_size",          "int",   1,   21,  1,    "{}"),
+    ParamDef("Canny",     "Min Val",      "canny_min_val",
+             "int",   0,   500, 1,    "{}"),
+    ParamDef("Canny",     "Max Val",      "canny_max_val",
+             "int",   0,   500, 1,    "{}"),
+    ParamDef("Canny",     "Dilate",       "dilate_size",
+             "int",   1,   21,  1,    "{}"),
     # ---- Hough ----
-    ParamDef("Hough",     "Threshold",    "hough_threshold",      "int",   0,   200, 1,    "{}"),
-    ParamDef("Hough",     "Min Length",   "min_line_length",      "int",   0,   800, 1,    "{} px"),
-    ParamDef("Hough",     "Max Gap",      "max_line_gap",         "int",   0,   200, 1,    "{} px"),
+    ParamDef("Hough",     "Threshold",    "hough_threshold",
+             "int",   0,   200, 1,    "{}"),
+    ParamDef("Hough",     "Min Length",   "min_line_length",
+             "int",   0,   800, 1,    "{} px"),
+    ParamDef("Hough",     "Max Gap",      "max_line_gap",
+             "int",   0,   200, 1,    "{} px"),
     # ---- Line ----
-    ParamDef("Line",      "Rightmost",    "find_rightmost_line",  "bool",  0,   1,   1,    "{}"),
-    ParamDef("Line",      "Median",       "median_line_enabled",  "bool",  0,   1,   1,    "{}"),
-    ParamDef("Line",      "Ref Offset",   "ref_offset_x",         "int",   -200, 200, 1,  "{} px"),
-    ParamDef("Line",      "Ref Angle",    "ref_angle_deg",        "int",   0,   180, 1,    "{:.0f} deg"),
+    ParamDef("Line",      "Rightmost",    "find_rightmost_line",
+             "bool",  0,   1,   1,    "{}"),
+    ParamDef("Line",      "Median",       "median_line_enabled",
+             "bool",  0,   1,   1,    "{}"),
+    ParamDef("Line",      "Ref Offset",   "ref_offset_x",
+             "int",   -200, 200, 1,  "{} px"),
+    ParamDef("Line",      "Ref Angle",    "ref_angle_deg",
+             "int",   0,   180, 1,    "{:.0f} deg"),
     # ---- ROI ----
-    ParamDef("ROI",       "ROI On",       "roi_enabled",          "bool",  0,   1,   1,    "{}"),
-    ParamDef("ROI",       "ROI X",        "roi_x",                "int",   0,   848, 1,    "{} px"),
-    ParamDef("ROI",       "ROI Y",        "roi_y",                "int",   0,   480, 1,    "{} px"),
-    ParamDef("ROI",       "ROI Width",    "roi_width",            "int",   10,  848, 1,    "{} px"),
-    ParamDef("ROI",       "ROI Height",   "roi_height",           "int",   10,  480, 1,    "{} px"),
+    ParamDef("ROI",       "ROI On",       "roi_enabled",
+             "bool",  0,   1,   1,    "{}"),
+    ParamDef("ROI",       "ROI X",        "roi_x",
+             "int",   0,   848, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Y",        "roi_y",
+             "int",   0,   480, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Width",    "roi_width",
+             "int",   10,  848, 1,    "{} px"),
+    ParamDef("ROI",       "ROI Height",   "roi_height",
+             "int",   10,  480, 1,    "{} px"),
 ]
 
 
@@ -159,7 +180,8 @@ class ConfigPanel:
         self.selected_camera = 0
         self._dirty_callback = dirty_callback
         self._dragging: int | None = None  # row index currently being dragged
-        self._rows: list[dict] = []        # row layout info: {y, is_header, param?}
+        # row layout info: {y, is_header, param?}
+        self._rows: list[dict] = []
         self._canvas_h = 800
 
     @property
@@ -279,9 +301,12 @@ class ConfigPanel:
         for i, ck in enumerate(CAMERA_ORDER):
             bx = self.MARGIN_L + i * (btn_w + 6)
             fill = (70, 150, 70) if i == self.selected_camera else (55, 55, 55)
-            border = (100, 200, 100) if i == self.selected_camera else (75, 75, 75)
-            cv2.rectangle(canvas, (bx, btn_y), (bx + btn_w, btn_y + btn_h), fill, -1)
-            cv2.rectangle(canvas, (bx, btn_y), (bx + btn_w, btn_y + btn_h), border, 1)
+            border = (100, 200, 100) if i == self.selected_camera else (
+                75, 75, 75)
+            cv2.rectangle(canvas, (bx, btn_y),
+                          (bx + btn_w, btn_y + btn_h), fill, -1)
+            cv2.rectangle(canvas, (bx, btn_y),
+                          (bx + btn_w, btn_y + btn_h), border, 1)
             short = ck.replace("_", " ").title()[:12]
             cv2.putText(canvas, short, (bx + 6, btn_y + 17), font, 0.42,
                         (255, 255, 255), 1, cv2.LINE_AA)
@@ -293,10 +318,12 @@ class ConfigPanel:
             # Section header
             if pdef.group != current_group:
                 current_group = pdef.group
-                cv2.rectangle(canvas, (6, y), (W - 6, y + self.HEADER_H), (42, 42, 48), -1)
+                cv2.rectangle(canvas, (6, y), (W - 6, y +
+                              self.HEADER_H), (42, 42, 48), -1)
                 cv2.putText(canvas, f"-- {pdef.group} --",
                             (self.MARGIN_L + 4, y + 23), font, 0.55, (160, 190, 240), 2, cv2.LINE_AA)
-                self._rows.append({"y": y, "is_header": True, "group": pdef.group})
+                self._rows.append(
+                    {"y": y, "is_header": True, "group": pdef.group})
                 y += self.HEADER_H + 2
 
             row_y = y
@@ -304,7 +331,8 @@ class ConfigPanel:
 
             # alternating row background
             bg = (40, 40, 40) if len(self._rows) % 2 == 0 else (35, 35, 35)
-            cv2.rectangle(canvas, (6, row_y), (W - 6, row_y + self.ROW_H), bg, -1)
+            cv2.rectangle(canvas, (6, row_y),
+                          (W - 6, row_y + self.ROW_H), bg, -1)
 
             # label
             cv2.putText(canvas, pdef.label, (self.MARGIN_L, row_y + 19),
@@ -324,12 +352,14 @@ class ConfigPanel:
             fill_w = int(frac * self.SLIDER_W)
             if fill_w > 0:
                 c = (55, 135, 210) if pdef.kind != "bool" else (55, 175, 95)
-                cv2.rectangle(canvas, (sx, sy), (sx + fill_w, sy + self.SLIDER_H), c, -1)
+                cv2.rectangle(canvas, (sx, sy),
+                              (sx + fill_w, sy + self.SLIDER_H), c, -1)
 
             # thumb
             tx = sx + fill_w - 2
             cv2.rectangle(canvas, (max(sx - 1, tx), sy - 1),
-                          (min(sx + self.SLIDER_W + 1, tx + 5), sy + self.SLIDER_H + 1),
+                          (min(sx + self.SLIDER_W + 1, tx + 5),
+                           sy + self.SLIDER_H + 1),
                           (240, 240, 240), 2)
 
             # +/- buttons
@@ -354,7 +384,8 @@ class ConfigPanel:
             else:
                 txt = pdef.fmt.format(int(val))
                 vc = (195, 225, 255)
-            cv2.putText(canvas, txt, (vx, row_y + 19), font, 0.50, vc, 1, cv2.LINE_AA)
+            cv2.putText(canvas, txt, (vx, row_y + 19),
+                        font, 0.50, vc, 1, cv2.LINE_AA)
 
             y += self.ROW_H
 
@@ -362,10 +393,12 @@ class ConfigPanel:
         footer_y = y + 8
         needed_h = max(footer_y + 40, 800)
         if canvas.shape[0] < needed_h:
-            pad = np.full((needed_h - canvas.shape[0], W, 3), 32, dtype=np.uint8)
+            pad = np.full(
+                (needed_h - canvas.shape[0], W, 3), 32, dtype=np.uint8)
             canvas = np.vstack((canvas, pad))
         self._canvas_h = canvas.shape[0]
-        cv2.rectangle(canvas, (0, footer_y), (W, self._canvas_h), (22, 22, 28), -1)
+        cv2.rectangle(canvas, (0, footer_y),
+                      (W, self._canvas_h), (22, 22, 28), -1)
         cv2.putText(canvas, "Drag sliders  |  +/- fine-tune  |  Click camera tabs  |  P=toggle  R=reset",
                     (self.MARGIN_L, footer_y + 28), font, 0.44, (150, 150, 150), 1, cv2.LINE_AA)
 
@@ -485,7 +518,8 @@ class RecordingAnalyzer:
         self.frame_by_number: dict[str, dict[int, FrameRecord]] = {}
         self.position_by_frame: dict[str, dict[int, int]] = {}
         self.base_time_arrays: dict[str, np.ndarray] = {}
-        self.current_line_cache: dict[tuple, tuple[int, int, int, int] | None] = {}
+        self.current_line_cache: dict[tuple,
+                                      tuple[int, int, int, int] | None] = {}
 
     def index_all_cameras(self) -> None:
         print(f"Recording root: {self.recording_root}")
@@ -521,7 +555,8 @@ class RecordingAnalyzer:
         color_dir = camera_root / "color"
         depth_dir = camera_root / "depth"
         if not color_dir.exists() or not depth_dir.exists():
-            raise FileNotFoundError(f"Missing color/depth folders below {camera_root}")
+            raise FileNotFoundError(
+                f"Missing color/depth folders below {camera_root}")
 
         color_paths = {
             frame_number(path): path for path in sorted(color_dir.glob("color_*.png"))
@@ -531,7 +566,8 @@ class RecordingAnalyzer:
         }
         common_indices = sorted(set(color_paths) & set(depth_paths))
         if not common_indices:
-            raise ValueError(f"No matching color/depth PNG pairs found below {camera_root}")
+            raise ValueError(
+                f"No matching color/depth PNG pairs found below {camera_root}")
 
         records = [
             FrameRecord(
@@ -597,14 +633,16 @@ class RecordingAnalyzer:
         target_time: float,
         offsets: dict[str, float],
     ) -> tuple[FrameRecord, float]:
-        times = self.base_time_arrays[camera_key] + offsets.get(camera_key, 0.0)
+        times = self.base_time_arrays[camera_key] + \
+            offsets.get(camera_key, 0.0)
         pos = int(np.searchsorted(times, target_time))
         candidates = [min(max(pos, 0), len(times) - 1)]
         if pos > 0:
             candidates.append(pos - 1)
         if pos + 1 < len(times):
             candidates.append(pos + 1)
-        best_pos = min(set(candidates), key=lambda idx: abs(times[idx] - target_time))
+        best_pos = min(set(candidates), key=lambda idx: abs(
+            times[idx] - target_time))
         record = self.frame_index[camera_key][best_pos]
         delta_ms = (times[best_pos] - target_time) * 1000.0
         return record, delta_ms
@@ -622,7 +660,8 @@ class RecordingAnalyzer:
             summary = []
             for camera_key in CAMERA_ORDER:
                 record, delta_ms = self.nearest_record(camera_key, t, offsets)
-                summary.append(f"{camera_key}=#{record.frame_index:06d} ({delta_ms:+.1f} ms)")
+                summary.append(
+                    f"{camera_key}=#{record.frame_index:06d} ({delta_ms:+.1f} ms)")
             print(f"master {probe:04d} @ {t:.3f}s: " + ", ".join(summary))
 
     def pipeline_signature(self, config: CameraConfig) -> tuple:
@@ -676,9 +715,11 @@ class RecordingAnalyzer:
             max_depth_m=config.depth_cutoff_max_m,
             enabled=config.depth_cutoff_enabled,
         )
-        depth_colormap = process_depth_image(edge_depth, depth_alpha=config.depth_alpha)
+        depth_colormap = process_depth_image(
+            edge_depth, depth_alpha=config.depth_alpha)
         # Production edge input for comparison:
-        depth_grayscale = cv2.convertScaleAbs(edge_depth, alpha=config.depth_alpha)
+        depth_grayscale = cv2.convertScaleAbs(
+            edge_depth, alpha=config.depth_alpha)
         canny_input = depth_grayscale
         canny_input = depth_colormap
         canny_edges = apply_canny_edge_detection(
@@ -703,7 +744,8 @@ class RecordingAnalyzer:
 
         record = self.frame_by_number[camera_key][frame_index]
         depth_image = load_depth(str(record.depth_path))
-        _, _, _, _, filtered_edges = self.build_edge_inputs(depth_image, config)
+        _, _, _, _, filtered_edges = self.build_edge_inputs(
+            depth_image, config)
         line = find_longest_line_right(
             filtered_edges,
             min_line_length=config.min_line_length,
@@ -727,9 +769,12 @@ class RecordingAnalyzer:
         if not config.median_line_enabled:
             return None, "disabled", 0
         position = self.position_by_frame[camera_key][record.frame_index]
-        start = max(0, position - config.median_line_window_size + 1)
-        history_records = self.frame_index[camera_key][start:position + 1]
-        line_history = [self.detect_line(camera_key, item.frame_index) for item in history_records]
+        start = max(0, position - config.median_line_window_size)
+        # Exclude the current frame so the temporal confidence is measured
+        # against an independent reference built from previous detections.
+        history_records = self.frame_index[camera_key][start:position]
+        line_history = [self.detect_line(
+            camera_key, item.frame_index) for item in history_records]
         valid_count = sum(line is not None for line in line_history)
         if len(line_history) < config.median_line_window_size:
             return None, f"warming up {len(line_history)}/{config.median_line_window_size}", valid_count
@@ -756,13 +801,14 @@ class RecordingAnalyzer:
         config = CAMERA_CONFIGS[camera_key]
         color_image = load_color(str(record.color_path)).copy()
         depth_image = load_depth(str(record.depth_path))
-        depth_work, applied_roi, _, depth_colormap, _ = self.build_edge_inputs(
+        depth_work, applied_roi, edge_depth, depth_colormap, _ = self.build_edge_inputs(
             depth_image, config
         )
 
         if applied_roi is not None:
             x, y, width, height = applied_roi
-            cv2.rectangle(color_image, (x, y), (x + width, y + height), (0, 255, 0), 2)
+            cv2.rectangle(color_image, (x, y),
+                          (x + width, y + height), (0, 255, 0), 2)
 
         camera_t = self.camera_time(record, offsets)
         current_line = self.detect_line(camera_key, record.frame_index)
@@ -838,12 +884,15 @@ class RecordingAnalyzer:
         h, w = depth_work.shape[:2]
         center_x, center_y = w // 2, h // 2
         center_depth = int(depth_work[center_y, center_x])
-        total_pixels = int(depth_work.size)
-        valid_pixels = int(np.count_nonzero(depth_work))
-        confidence_percent = (
-            100.0 * valid_pixels / total_pixels if total_pixels else 0.0
+        pixel_score, valid_pixels, total_pixels = calculate_pixel_validity_score(
+            edge_depth)
+        temporal_score, center_x_diff_px, ang_diff_deg = calculate_temporal_line_score(
+            current_line=current_line,
+            median_line=median_line,
+            image_height=depth_work.shape[0],
         )
-        cv2.circle(result_img, (center_x, center_y), radius=3, color=current_color, thickness=-1)
+        cv2.circle(result_img, (center_x, center_y), radius=3,
+                   color=current_color, thickness=-1)
         _, _, center_pixel_area = calculate_pixel_area(
             depth_in_mm=center_depth,
             theta_horizontal=THETA_HORIZONTAL,
@@ -866,8 +915,16 @@ class RecordingAnalyzer:
             (f"Center depth {center_depth} mm", current_text_color),
             (f"Pixel area {center_pixel_area:.2f} mm^2", current_text_color),
             (
-                f"Confidence {confidence_percent:.1f}% "
-                f"({valid_pixels}/{total_pixels} valid)",
+                f"Pixel score    {pixel_score:5.1f}%  ({valid_pixels}/{total_pixels} valid)",
+                current_text_color,
+            ),
+            (
+                f"Temporal score {temporal_score:5.1f}%  "
+                + (
+                    f"(Δcx={center_x_diff_px:.1f}px Δang={ang_diff_deg:.2f}deg)"
+                    if center_x_diff_px is not None else
+                    "(no current/median line)"
+                ),
                 current_text_color,
             ),
         ]
@@ -885,26 +942,33 @@ class RecordingAnalyzer:
         detection_lines = [("Detected line", current_text_color)]
         if current_line is not None and angle_deviation is not None:
             detection_lines += [
-                (f"Current angle {angle_deviation:.2f} deg", current_text_color),
-                (f"Current horiz {horizontal_deviation:.1f} px", current_text_color),
+                (f"Current angle {angle_deviation:.2f} deg",
+                 current_text_color),
+                (f"Current horiz {horizontal_deviation:.1f} px",
+                 current_text_color),
                 (f"Current horiz {current_mm}", current_text_color),
             ]
         else:
-            detection_lines.append(("Current: no detection", current_text_color))
+            detection_lines.append(
+                ("Current: no detection", current_text_color))
 
         if config.median_line_enabled:
             if median_line is not None and median_angle_deviation is not None:
                 detection_lines += [
-                    (f"Median angle {median_angle_deviation:.2f} deg", median_text_color),
-                    (f"Median horiz {median_horizontal_deviation:.1f} px", median_text_color),
+                    (f"Median angle {median_angle_deviation:.2f} deg",
+                     median_text_color),
+                    (f"Median horiz {median_horizontal_deviation:.1f} px",
+                     median_text_color),
                     (f"Median horiz {median_mm}", median_text_color),
                 ]
             else:
-                detection_lines.append((f"Median: {median_status}", median_text_color))
+                detection_lines.append(
+                    (f"Median: {median_status}", median_text_color))
 
         depth_tile = result_img
         if applied_roi is not None and config.display_depth_roi_in_full_frame:
-            depth_tile = place_roi_in_full_frame(result_img, depth_image.shape[:2], applied_roi)
+            depth_tile = place_roi_in_full_frame(
+                result_img, depth_image.shape[:2], applied_roi)
         depth_tile = add_label(
             depth_tile,
             [
@@ -932,9 +996,11 @@ class RecordingAnalyzer:
         for row_keys in CAMERA_GRID:
             row_panels = []
             for camera_key in row_keys:
-                record, delta_ms = self.nearest_record(camera_key, target_time, offsets)
+                record, delta_ms = self.nearest_record(
+                    camera_key, target_time, offsets)
                 row_panels.append(
-                    self.render_camera_row(camera_key, record, target_time, delta_ms, offsets)
+                    self.render_camera_row(
+                        camera_key, record, target_time, delta_ms, offsets)
                 )
             grid_rows.append(hstack_padded(row_panels, gap=12))
         body = vstack_padded(grid_rows, gap=12)
@@ -983,7 +1049,8 @@ class RecordingAnalyzer:
         # Snapshot original config values so the user can reset with 'r'.
         import dataclasses as _dc
         _original_configs: dict[str, dict[str, object]] = {
-            ck: {f.name: getattr(cfg, f.name) for f in _dc.fields(CameraConfig)}
+            ck: {f.name: getattr(cfg, f.name)
+                 for f in _dc.fields(CameraConfig)}
             for ck, cfg in CAMERA_CONFIGS.items()
         }
 
@@ -1003,10 +1070,12 @@ class RecordingAnalyzer:
             state["dirty"] = True
 
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.createTrackbar("master_frame", window_name, state["frame"], max_frame, on_trackbar)
+        cv2.createTrackbar("master_frame", window_name,
+                           state["frame"], max_frame, on_trackbar)
 
         # ---- Config panel ----
-        config_panel = ConfigPanel("Config Panel", dirty_callback=lambda: state.update(dirty=True))
+        config_panel = ConfigPanel(
+            "Config Panel", dirty_callback=lambda: state.update(dirty=True))
         config_visible = True
         config_panel.open()
         # -----------------------
@@ -1020,7 +1089,8 @@ class RecordingAnalyzer:
                     config_panel.open()
 
                 if state["dirty"] or last_image is None:
-                    target_time = self.master_time_for_frame(state["frame"], offsets)
+                    target_time = self.master_time_for_frame(
+                        state["frame"], offsets)
                     overview = self.render_overview_frame(target_time, offsets)
                     last_image = add_opencv_status_bar(
                         overview,
@@ -1106,7 +1176,8 @@ def pad_to_height(
 ) -> np.ndarray:
     if image.shape[0] >= height:
         return image
-    pad = np.full((height - image.shape[0], image.shape[1], 3), color, dtype=np.uint8)
+    pad = np.full(
+        (height - image.shape[0], image.shape[1], 3), color, dtype=np.uint8)
     return np.vstack((image, pad))
 
 
@@ -1117,7 +1188,8 @@ def pad_to_width(
 ) -> np.ndarray:
     if image.shape[1] >= width:
         return image
-    pad = np.full((image.shape[0], width - image.shape[1], 3), color, dtype=np.uint8)
+    pad = np.full(
+        (image.shape[0], width - image.shape[1], 3), color, dtype=np.uint8)
     return np.hstack((image, pad))
 
 
@@ -1186,7 +1258,8 @@ def make_info_panel_columns(
         x = margin_x + col_idx * (col_width + col_gap)
         if col_idx > 0:
             sep_x = x - col_gap // 2
-            cv2.line(panel, (sep_x, margin_y), (sep_x, height - margin_y), (58, 58, 58), 1, cv2.LINE_AA)
+            cv2.line(panel, (sep_x, margin_y), (sep_x, height -
+                     margin_y), (58, 58, 58), 1, cv2.LINE_AA)
 
         for line_idx, (text, color) in enumerate(column):
             if not text:
@@ -1195,7 +1268,8 @@ def make_info_panel_columns(
             scale = 0.82 if is_title else font_scale
             thickness = 2 if is_title else 1
             y = margin_y + 28 + line_idx * line_h
-            cv2.putText(panel, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
+            cv2.putText(panel, text, (x, y), font, scale,
+                        color, thickness, cv2.LINE_AA)
     return panel
 
 
@@ -1211,7 +1285,8 @@ def place_roi_in_full_frame(
     paste_h = min(height, roi_image.shape[0], full_h - y)
     if paste_w > 0 and paste_h > 0:
         canvas[y:y + paste_h, x:x + paste_w] = roi_image[:paste_h, :paste_w]
-        cv2.rectangle(canvas, (x, y), (x + paste_w, y + paste_h), (0, 255, 0), 2)
+        cv2.rectangle(canvas, (x, y), (x + paste_w,
+                      y + paste_h), (0, 255, 0), 2)
     return canvas
 
 
@@ -1223,7 +1298,8 @@ def add_opencv_status_bar(
     typed_index: str,
 ) -> np.ndarray:
     bar_h = 86
-    output = np.vstack((image, np.zeros((bar_h, image.shape[1], 3), dtype=np.uint8)))
+    output = np.vstack(
+        (image, np.zeros((bar_h, image.shape[1], 3), dtype=np.uint8)))
     typed = typed_index if typed_index else "-"
     cv2.putText(
         output,
@@ -1249,7 +1325,8 @@ def add_opencv_status_bar(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Open the four-camera recording analyzer.")
+    parser = argparse.ArgumentParser(
+        description="Open the four-camera recording analyzer.")
     parser.add_argument(
         "recording_root",
         type=Path,
