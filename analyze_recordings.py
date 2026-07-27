@@ -40,6 +40,61 @@ DEFAULT_DEPTH_SCALE = 0.0010000000474974513
 
 @dataclass
 class CameraConfig:
+    """Per-camera pipeline parameters tuned for a specific mounting position.
+
+    All fields are tunable at runtime via the ``ConfigPanel`` sliders.
+    The dataclass holds both algorithmic parameters (depth cutoff, Canny,
+    Hough) and visualization settings (alpha, info panel, reference line).
+
+    Attributes:
+        label: Human-readable camera name shown in the UI (e.g. "Front left").
+        folder: Sub-directory name under the recording root that holds this
+            camera's ``color/`` and ``depth/`` frame pairs.
+        offset_seconds: Time offset applied when synchronizing this camera
+            against the master timeline. Positive values shift the camera
+            later; negative values shift it earlier.
+        depth_scale: Multiplier that converts raw depth units to meters
+            (RealSense D435f default: ``0.001``).
+        roi_enabled: When True, only a rectangular region of interest is
+            processed instead of the full frame.
+        roi_x: Left edge of the ROI in pixels (from the original frame).
+        roi_y: Top edge of the ROI in pixels.
+        roi_width: Width of the ROI in pixels.
+        roi_height: Height of the ROI in pixels.
+        depth_alpha: Contrast factor for the depth colormap visualization
+            (range 0–1, higher = more contrast).
+        depth_cutoff_enabled: When True, depth values outside
+            ``[depth_cutoff_min_m, depth_cutoff_max_m]`` are zeroed out.
+        depth_cutoff_min_m: Closest allowed depth in meters.
+        depth_cutoff_max_m: Furthest allowed depth in meters.
+        canny_min_val: Lower hysteresis threshold for Canny edge detection.
+        canny_max_val: Upper hysteresis threshold for Canny edge detection.
+        dilate_size: Kernel size for dilating the zero-depth mask before
+            filtering edges that touch invalid pixels (odd number; 1 = off).
+        min_line_length: Minimum line length (px) accepted by the
+            probabilistic Hough transform.
+        max_line_gap: Maximum gap (px) between segments that Hough will
+            consider part of the same line.
+        hough_threshold: Minimum accumulator votes for Hough; higher values
+            produce fewer, more confident line detections.
+        find_rightmost_line: When True, pick the rightmost among the longest
+            Hough candidates; otherwise pick the leftmost. Set according to
+            which side of the vehicle the camera is mounted.
+        median_line_enabled: When True, compute a median reference line from
+            the recent detection history for temporal scoring.
+        median_line_window_size: Number of past frames to include in the
+            median-line history window.
+        median_line_min_detections: Minimum number of valid detections
+            required in the history window for the median to be computed.
+        ref_offset_x: Horizontal offset (px) of the reference line from the
+            image center. Used for deviation calculations and visualization.
+        ref_angle_deg: Angle of the reference line in degrees (90 = vertical).
+        info_panel_width: Pixel width of the info panel rendered below each
+            camera row. Pure visualization; does not affect the pipeline.
+        display_depth_roi_in_full_frame: When True and ROI is enabled, the
+            processed depth tile is placed at its ROI position inside a
+            full-frame-sized canvas instead of showing the cropped region.
+    """
     label: str
     folder: str
     offset_seconds: float = 0.0
@@ -99,15 +154,30 @@ class CameraConfig:
 
 @dataclass
 class ParamDef:
-    """Definition of a single tunable parameter for the config panel."""
-    group: str        # section header (e.g. "Depth", "Canny")
-    label: str        # display label
-    attr: str         # attribute name on CameraConfig
-    kind: str         # 'int', 'float', 'bool'
-    vmin: float       # slider minimum
-    vmax: float       # slider maximum
-    step: float       # fine-step for +/- buttons
-    fmt: str          # format string (e.g. "{:.2f} m")
+    """Definition of a single tunable parameter rendered in the ``ConfigPanel``.
+
+    Attributes:
+        group: Section header under which the parameter is grouped
+            (e.g. ``"Depth"``, ``"Canny"``).
+        label: Human-readable label shown next to the slider.
+        attr: Name of the corresponding attribute on :class:`CameraConfig`
+            that this slider reads from and writes to.
+        kind: Data type of the parameter: ``"int"``, ``"float"``, or ``"bool"``.
+        vmin: Minimum slider value.
+        vmax: Maximum slider value.
+        step: Increment/decrement amount used by the ``+``/``-`` fine-tune
+            buttons.
+        fmt: Python format string used to display the current value
+            (e.g. ``"{:.2f} m"``).
+    """
+    group: str
+    label: str
+    attr: str
+    kind: str
+    vmin: float
+    vmax: float
+    step: float
+    fmt: str
 
 
 CONFIG_PARAMS: list[ParamDef] = [
@@ -176,6 +246,15 @@ class ConfigPanel:
     BTN_W = 16         # width of +/- buttons
 
     def __init__(self, window_name: str, dirty_callback: Callable[[], None] | None = None):
+        """Create the config panel.
+
+        Args:
+            window_name: OpenCV window name used for ``imshow`` / mouse
+                callbacks.
+            dirty_callback: Optional callable invoked whenever any slider
+                value changes, so the parent viewer can mark its display
+                as needing a redraw.
+        """
         self.window_name = window_name
         self.selected_camera = 0
         self._dirty_callback = dirty_callback
@@ -186,14 +265,20 @@ class ConfigPanel:
 
     @property
     def config(self) -> CameraConfig:
+        """The :class:`CameraConfig` currently selected via the camera tabs."""
         return CAMERA_CONFIGS[CAMERA_ORDER[self.selected_camera]]
 
     # -- value helpers ---------------------------------------------------
 
     def _get(self, p: ParamDef) -> float:
+        """Read the current value of *p* from the active camera config."""
         return float(getattr(self.config, p.attr))
 
     def _set(self, p: ParamDef, value: float) -> None:
+        """Write *value* back to the active config, casting to the correct type.
+
+        Fires the dirty callback (if set) so the viewer re-renders.
+        """
         if p.kind == "bool":
             setattr(self.config, p.attr, value >= 0.5)
         elif p.kind == "int":
@@ -206,13 +291,16 @@ class ConfigPanel:
     # -- coordinate mapping ----------------------------------------------
 
     def _slider_left(self) -> int:
+        """X-coordinate of the left edge of the slider track."""
         return self.MARGIN_L + self.LABEL_W + self.GAP + self.BTN_W
 
     def _to_frac(self, p: ParamDef) -> float:
+        """Map the current value of *p* to a 0–1 fraction for the slider fill."""
         denom = p.vmax - p.vmin
         return (self._get(p) - p.vmin) / denom if denom != 0 else 0.5
 
     def _x_to_val(self, p: ParamDef, mx: int) -> float:
+        """Convert a mouse x-coordinate on the slider track back to a raw value."""
         rel = mx - self._slider_left()
         frac = max(0.0, min(1.0, rel / self.SLIDER_W))
         return p.vmin + frac * (p.vmax - p.vmin)
@@ -220,7 +308,8 @@ class ConfigPanel:
     # -- row hit-testing -------------------------------------------------
 
     def _hit_row(self, my: int) -> int | None:
-        """Return row index under the mouse y, or None."""
+        """Return the parameter row index under mouse y, or ``None`` if no
+        slider row was hit (skipping section headers)."""
         for idx, r in enumerate(self._rows):
             if r["is_header"]:
                 continue
@@ -230,7 +319,7 @@ class ConfigPanel:
         return None
 
     def _hit_camera_btn(self, mx: int, my: int) -> int | None:
-        """Return camera index (0-3) if a camera button was clicked."""
+        """Return the camera tab index (0–3) under the mouse, or ``None``."""
         btn_y = 44
         btn_h = 24
         if not (btn_y <= my < btn_y + btn_h):
@@ -246,6 +335,8 @@ class ConfigPanel:
     # -- mouse callback --------------------------------------------------
 
     def _on_mouse(self, event: int, x: int, y: int, flags: int, _param: object) -> None:
+        """OpenCV mouse callback: handles slider drags, +/- buttons, and
+        camera tab clicks."""
         if event == cv2.EVENT_LBUTTONDOWN:
             # Camera selector buttons?
             cam = self._hit_camera_btn(x, y)
@@ -407,18 +498,21 @@ class ConfigPanel:
     # -- public API ------------------------------------------------------
 
     def open(self) -> None:
+        """Create (or re-create) the config-panel OpenCV window and render it."""
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, self.WIDTH, self._canvas_h)
         cv2.setMouseCallback(self.window_name, self._on_mouse)
         self.render()
 
     def close(self) -> None:
+        """Destroy the config-panel window (safe to call even if already closed)."""
         try:
             cv2.destroyWindow(self.window_name)
         except cv2.error:
             pass
 
     def is_visible(self) -> bool:
+        """Return ``True`` if the config-panel window currently exists and is visible."""
         try:
             return cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) >= 1.0
         except cv2.error:
@@ -427,6 +521,20 @@ class ConfigPanel:
 
 @dataclass(frozen=True)
 class FrameRecord:
+    """Immutable reference to one matched color+depth frame pair.
+
+    Each frame is identified by its integer ``frame_index`` and assigned a
+    ``base_time`` derived from ``(frame_index - 1) / FPS``.  The record
+    stores the on-disk paths to both the color and depth PNG files.
+
+    Attributes:
+        camera_key: Logical camera name (e.g. ``"front_left"``).
+        frame_index: Integer frame number parsed from the filename.
+        color_path: Absolute path to the color PNG.
+        depth_path: Absolute path to the depth PNG (16-bit).
+        base_time: Nominal capture time in seconds, computed from the frame
+            index under the constant-FPS assumption.
+    """
     camera_key: str
     frame_index: int
     color_path: Path
@@ -489,6 +597,18 @@ CAMERA_CONFIGS: dict[str, CameraConfig] = {
 
 
 def frame_number(path: Path) -> int:
+    """Extract the integer frame number from a filename like ``color_000042.png``.
+
+    Args:
+        path: Path whose filename is expected to contain an underscore
+            followed by digits immediately before the ``.png`` extension.
+
+    Returns:
+        Parsed integer frame number.
+
+    Raises:
+        ValueError: If no ``_<digits>.png`` pattern is found in the filename.
+    """
     match = re.search(r"_(\d+)\.png$", path.name)
     if match is None:
         raise ValueError(f"Cannot parse frame number from {path.name}")
@@ -497,6 +617,21 @@ def frame_number(path: Path) -> int:
 
 @lru_cache(maxsize=768)
 def load_color(path: str) -> np.ndarray:
+    """Load a BGR color image from disk with LRU caching.
+
+    Repeated requests for the same path return the cached array without
+    re-reading from disk.  The cache is bounded at 768 entries to limit
+    memory usage during long interactive sessions.
+
+    Args:
+        path: Filesystem path to a color PNG.
+
+    Returns:
+        BGR image as a numpy array (``height × width × 3``, ``uint8``).
+
+    Raises:
+        FileNotFoundError: If the file cannot be read by OpenCV.
+    """
     image = cv2.imread(path, cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(path)
@@ -505,6 +640,19 @@ def load_color(path: str) -> np.ndarray:
 
 @lru_cache(maxsize=768)
 def load_depth(path: str) -> np.ndarray:
+    """Load a 16-bit depth image from disk with LRU caching.
+
+    Same caching strategy as :func:`load_color`.
+
+    Args:
+        path: Filesystem path to a depth PNG.
+
+    Returns:
+        Depth image as a numpy array (``uint16``).
+
+    Raises:
+        FileNotFoundError: If the file cannot be read by OpenCV.
+    """
     image = cv2.imread(path, cv2.IMREAD_ANYDEPTH)
     if image is None:
         raise FileNotFoundError(path)
@@ -513,6 +661,13 @@ def load_depth(path: str) -> np.ndarray:
 
 class RecordingAnalyzer:
     def __init__(self, recording_root: Path):
+        """Create an analyzer for a four-camera recording directory.
+
+        Args:
+            recording_root: Top-level folder containing the per-camera
+                sub-directories (``depth_front_left/``, etc.), each with
+                ``color/`` and ``depth/`` sub-folders of timestamped PNGs.
+        """
         self.recording_root = recording_root.expanduser().resolve()
         self.frame_index: dict[str, list[FrameRecord]] = {}
         self.frame_by_number: dict[str, dict[int, FrameRecord]] = {}
@@ -522,6 +677,11 @@ class RecordingAnalyzer:
                                       tuple[int, int, int, int] | None] = {}
 
     def index_all_cameras(self) -> None:
+        """Scan all four cameras and build the in-memory frame indices.
+
+        Must be called once before any other method.  Prints a summary of
+        frame counts and missing pairs per camera.
+        """
         print(f"Recording root: {self.recording_root}")
         print(f"Nominal FPS: {FPS:g}")
         for camera_key in CAMERA_ORDER:
@@ -551,6 +711,21 @@ class RecordingAnalyzer:
         camera_key: str,
         config: CameraConfig,
     ) -> tuple[list[FrameRecord], list[int], list[int]]:
+        """Index one camera's ``color/`` and ``depth/`` sub-directories.
+
+        Pairs files by their frame number.  Only frames with both a color
+        and a depth PNG are included in the returned record list.
+
+        Args:
+            camera_key: Logical camera name.
+            config: Camera configuration (used only for the folder path).
+
+        Returns:
+            Tuple of ``(records, missing_color, missing_depth)`` where
+            *records* is the list of paired :class:`FrameRecord` objects in
+            frame-number order, and the two ``missing_*`` lists contain frame
+            numbers that only exist in one of the two directories.
+        """
         camera_root = self.recording_root / config.folder
         color_dir = camera_root / "color"
         depth_dir = camera_root / "depth"
@@ -584,12 +759,14 @@ class RecordingAnalyzer:
         return records, missing_color, missing_depth
 
     def config_offsets(self) -> dict[str, float]:
+        """Return the per-camera time offsets as a ``{camera_key: seconds}`` dict."""
         return {
             camera_key: CAMERA_CONFIGS[camera_key].offset_seconds
             for camera_key in CAMERA_ORDER
         }
 
     def camera_time(self, record: FrameRecord, offsets: dict[str, float]) -> float:
+        """Compute the synchronized time of *record* by applying its camera's offset."""
         return record.base_time + offsets.get(record.camera_key, 0.0)
 
     def camera_bounds(
@@ -597,6 +774,7 @@ class RecordingAnalyzer:
         camera_key: str,
         offsets: dict[str, float],
     ) -> tuple[float, float]:
+        """Return the (start, end) synchronized time range for one camera."""
         records = self.frame_index[camera_key]
         offset = offsets.get(camera_key, 0.0)
         return records[0].base_time + offset, records[-1].base_time + offset
@@ -605,6 +783,13 @@ class RecordingAnalyzer:
         self,
         offsets: dict[str, float] | None = None,
     ) -> tuple[float, float]:
+        """Return the time range where **all four** cameras have data.
+
+        This is the intersection of each camera's synchronized time span.
+
+        Raises:
+            ValueError: If the offsets produce no overlap at all.
+        """
         offsets = self.config_offsets() if offsets is None else offsets
         starts, ends = zip(
             *(self.camera_bounds(camera_key, offsets) for camera_key in CAMERA_ORDER)
@@ -616,6 +801,10 @@ class RecordingAnalyzer:
         return start, end
 
     def master_frame_count(self, offsets: dict[str, float] | None = None) -> int:
+        """Number of master timeline frames covering the common overlap.
+
+        One master frame per ``1/FPS`` second.
+        """
         start, end = self.common_time_bounds(offsets)
         return max(1, int(np.floor((end - start) * FPS)) + 1)
 
@@ -624,6 +813,7 @@ class RecordingAnalyzer:
         master_frame: int,
         offsets: dict[str, float] | None = None,
     ) -> float:
+        """Convert a master frame index to an absolute synchronized time."""
         start, _ = self.common_time_bounds(offsets)
         return start + master_frame / FPS
 
@@ -633,6 +823,16 @@ class RecordingAnalyzer:
         target_time: float,
         offsets: dict[str, float],
     ) -> tuple[FrameRecord, float]:
+        """Find the :class:`FrameRecord` whose synchronized time is closest to
+        *target_time*.
+
+        Searches among up to three candidate indices (the insertion point ± 1)
+        to handle the case where the target falls between frames.
+
+        Returns:
+            Tuple of ``(record, delta_ms)`` where *delta_ms* is the signed
+            difference ``record_time - target_time`` in milliseconds.
+        """
         times = self.base_time_arrays[camera_key] + \
             offsets.get(camera_key, 0.0)
         pos = int(np.searchsorted(times, target_time))
@@ -648,6 +848,7 @@ class RecordingAnalyzer:
         return record, delta_ms
 
     def print_sync_summary(self) -> None:
+        """Print the common overlap range and a few sample sync points to stdout."""
         offsets = self.config_offsets()
         overlap_start, overlap_end = self.common_time_bounds(offsets)
         master_count = self.master_frame_count(offsets)
@@ -665,6 +866,12 @@ class RecordingAnalyzer:
             print(f"master {probe:04d} @ {t:.3f}s: " + ", ".join(summary))
 
     def pipeline_signature(self, config: CameraConfig) -> tuple:
+        """Return a hashable tuple of all pipeline-affecting config values.
+
+        Used as part of the :meth:`detect_line` cache key so that changing
+        any parameter (Canny thresholds, ROI, etc.) invalidates cached
+        detections.
+        """
         return (
             config.depth_scale,
             config.roi_enabled,
@@ -692,6 +899,14 @@ class RecordingAnalyzer:
         depth_image: np.ndarray,
         config: CameraConfig,
     ) -> tuple[np.ndarray, tuple[int, int, int, int] | None]:
+        """Optionally extract the ROI from *depth_image*.
+
+        Returns:
+            Tuple of ``(cropped_image, roi)`` where *roi* is
+            ``(x, y, width, height)`` if cropping was applied, or ``None``
+            if :attr:`CameraConfig.roi_enabled` is ``False`` (in which case
+            a full copy of the input is returned).
+        """
         if not config.roi_enabled:
             return depth_image.copy(), None
         height, width = depth_image.shape[:2]
@@ -707,6 +922,21 @@ class RecordingAnalyzer:
         return depth_image[y0:y1, x0:x1].copy(), (x0, y0, x1 - x0, y1 - y0)
 
     def build_edge_inputs(self, depth_image: np.ndarray, config: CameraConfig):
+        """Run the full pre-processing chain on a raw depth image.
+
+        Steps: ROI crop → depth cutoff → colormap → Canny edges → zero-boundary
+        filtering.
+
+        Returns:
+            Tuple of ``(depth_work, applied_roi, edge_depth, depth_colormap,
+            filtered_edges)`` where:
+
+            * *depth_work* — cropped (or full) depth array.
+            * *applied_roi* — ROI as ``(x, y, w, h)`` or ``None``.
+            * *edge_depth* — depth array after cutoff (used for pixel score).
+            * *depth_colormap* — JET-coloured depth visualization (BGR).
+            * *filtered_edges* — binary edge image ready for Hough.
+        """
         depth_work, applied_roi = self.crop_depth(depth_image, config)
         edge_depth = apply_depth_cutoff(
             depth_work,
@@ -737,6 +967,16 @@ class RecordingAnalyzer:
         camera_key: str,
         frame_index: int,
     ) -> tuple[int, int, int, int] | None:
+        """Run the full detection pipeline for a single frame and return the
+        selected Hough line.
+
+        Results are cached keyed on ``(camera, frame, pipeline_signature)``
+        so repeated requests (e.g. for the median window) are cheap.
+
+        Returns:
+            Detected line as ``(x1, y1, x2, y2)`` in ROI coordinates, or
+            ``None`` if no line was found.
+        """
         config = CAMERA_CONFIGS[camera_key]
         cache_key = (camera_key, frame_index, self.pipeline_signature(config))
         if cache_key in self.current_line_cache:
@@ -765,6 +1005,19 @@ class RecordingAnalyzer:
         image_width: int,
         image_height: int,
     ):
+        """Compute the median reference line from the detection history
+        preceding the given frame.
+
+        The current frame is intentionally excluded so the temporal
+        confidence score compares against an independent reference.
+
+        Returns:
+            Tuple of ``(median_line, status, valid_count)`` where
+            *median_line* is ``(x1, y1, x2, y2)`` or ``None``, *status* is a
+            human-readable label (``"disabled"``, ``"warming up …"``,
+            ``"no majority …"``, ``"ready …"``, ``"unavailable"``), and
+            *valid_count* is the number of valid detections in the window.
+        """
         config = CAMERA_CONFIGS[camera_key]
         if not config.median_line_enabled:
             return None, "disabled", 0
@@ -798,6 +1051,18 @@ class RecordingAnalyzer:
         delta_ms: float,
         offsets: dict[str, float],
     ) -> np.ndarray:
+        """Render the full visualization tile for one camera.
+
+        Produces a vertical stack of:
+
+        1. A side-by-side pair: color frame (with ROI rectangle) | processed
+           depth tile (with detected, median, and reference lines drawn).
+        2. A three-column info panel showing status, config, and detection
+           metrics (including the pixel and temporal confidence scores).
+
+        Returns:
+            A BGR image suitable for arrangement in the overview grid.
+        """
         config = CAMERA_CONFIGS[camera_key]
         color_image = load_color(str(record.color_path)).copy()
         depth_image = load_depth(str(record.depth_path))
@@ -991,6 +1256,15 @@ class RecordingAnalyzer:
         target_time: float,
         offsets: dict[str, float] | None = None,
     ) -> np.ndarray:
+        """Render the full four-camera grid for a single master time point.
+
+        Arranges the four camera rows in a 2×2 grid (front row above,
+        rear row below) with a header bar showing the target time and
+        overlap range.
+
+        Returns:
+            A single BGR image combining all four cameras.
+        """
         offsets = self.config_offsets() if offsets is None else offsets
         grid_rows = []
         for row_keys in CAMERA_GRID:
@@ -1028,9 +1302,6 @@ class RecordingAnalyzer:
         )
         return vstack_padded([header, body], gap=0)
 
-    # ------------------------------------------------------------------
-    # Main keyboard viewer
-    # ------------------------------------------------------------------
     def run_opencv_keyboard_viewer(
         self,
         start_frame: int = 0,
@@ -1038,6 +1309,28 @@ class RecordingAnalyzer:
         resize_window_on_frame_change: bool = False,
         window_name: str = "Four-camera recording viewer",
     ) -> None:
+        """Launch the interactive OpenCV viewer (blocking main loop).
+
+        Keyboard controls:
+
+        * ``A`` / ``D`` or Left / Right — step one master frame.
+        * ``W`` / ``S`` or Up / Down — step ±10 frames.
+        * ``Space`` — advance one frame.
+        * ``Home`` / ``End`` — jump to first / last frame.
+        * Digits + ``Enter`` — jump to a specific frame number.
+        * ``Backspace`` — edit the typed frame number.
+        * ``P`` — toggle the config panel.
+        * ``R`` — reset all config sliders to their original values.
+        * ``Q`` / ``Esc`` — quit.
+
+        Args:
+            start_frame: Initial master frame index.
+            display_scale: Scale factor applied to the OpenCV window
+                (1.0 = full rendered resolution).
+            resize_window_on_frame_change: When True, re-apply the scale on
+                every frame change (can be jarring; default is once).
+            window_name: Title of the main OpenCV window.
+        """
         offsets = self.config_offsets()
         max_frame = self.master_frame_count(offsets) - 1
         state = {
@@ -1174,6 +1467,8 @@ def pad_to_height(
     height: int,
     color: tuple[int, int, int] = (0, 0, 0),
 ) -> np.ndarray:
+    """Vertically pad *image* to *height* with solid *color*, or return it
+    unchanged if already tall enough."""
     if image.shape[0] >= height:
         return image
     pad = np.full(
@@ -1186,6 +1481,8 @@ def pad_to_width(
     width: int,
     color: tuple[int, int, int] = (0, 0, 0),
 ) -> np.ndarray:
+    """Horizontally pad *image* to *width* with solid *color*, or return it
+    unchanged if already wide enough."""
     if image.shape[1] >= width:
         return image
     pad = np.full(
@@ -1194,6 +1491,8 @@ def pad_to_width(
 
 
 def hstack_padded(images: list[np.ndarray], gap: int = 8) -> np.ndarray:
+    """Horizontally stack images, padding shorter ones to equal height and
+    inserting a black *gap* between them."""
     height = max(image.shape[0] for image in images)
     padded = []
     for image in images:
@@ -1204,6 +1503,8 @@ def hstack_padded(images: list[np.ndarray], gap: int = 8) -> np.ndarray:
 
 
 def vstack_padded(images: list[np.ndarray], gap: int = 10) -> np.ndarray:
+    """Vertically stack images, padding narrower ones to equal width and
+    inserting a black *gap* between them."""
     width = max(image.shape[1] for image in images)
     padded = []
     for image in images:
@@ -1214,6 +1515,8 @@ def vstack_padded(images: list[np.ndarray], gap: int = 10) -> np.ndarray:
 
 
 def add_label(image: np.ndarray, lines: list[str]) -> np.ndarray:
+    """Overlay a semi-transparent title bar with *lines* of text at the top
+    of *image*.  Returns a new array (the original is not modified)."""
     labeled = image.copy()
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.78
@@ -1242,6 +1545,15 @@ def make_info_panel_columns(
     min_height: int = 240,
     font_scale: float = 0.72,
 ) -> np.ndarray:
+    """Render a multi-column text panel.
+
+    Each column is a list of ``(text, bgr_color)`` tuples; the first row of
+    each column is rendered slightly larger as a section title.  Columns are
+    separated by thin vertical lines.
+
+    Returns:
+        A BGR image of exactly *width* pixels wide.
+    """
     margin_x = 16
     margin_y = 16
     col_gap = 20
@@ -1278,6 +1590,8 @@ def place_roi_in_full_frame(
     full_shape: tuple[int, int],
     roi: tuple[int, int, int, int],
 ) -> np.ndarray:
+    """Paste *roi_image* into a black canvas the size of *full_shape* at the
+    position given by *roi* ``(x, y, w, h)``, drawing a green border around it."""
     full_h, full_w = full_shape[:2]
     x, y, width, height = roi
     canvas = np.zeros((full_h, full_w, 3), dtype=np.uint8)
@@ -1297,6 +1611,8 @@ def add_opencv_status_bar(
     target_time: float,
     typed_index: str,
 ) -> np.ndarray:
+    """Append a dark status bar below *image* showing the current frame
+    position, target time, typed jump buffer, and keyboard shortcut hints."""
     bar_h = 86
     output = np.vstack(
         (image, np.zeros((bar_h, image.shape[1], 3), dtype=np.uint8)))
@@ -1325,6 +1641,7 @@ def add_opencv_status_bar(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the recording analyzer."""
     parser = argparse.ArgumentParser(
         description="Open the four-camera recording analyzer.")
     parser.add_argument(
@@ -1348,6 +1665,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Entry point: index the recording, print a sync summary, then launch
+    the interactive OpenCV viewer."""
     args = parse_args()
     analyzer = RecordingAnalyzer(args.recording_root)
     analyzer.index_all_cameras()
