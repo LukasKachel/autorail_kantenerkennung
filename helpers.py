@@ -448,8 +448,19 @@ def calculate_temporal_line_score(
     current_line,
     median_line,
     image_height,
+    max_tolerated_center_shift_px: float = 40.0,
+    max_tolerated_angle_deviation_deg: float = 20.0,
 ):
     """Compare the currently detected line with the median line.
+
+    Args:
+        current_line: Currently detected line as ``(x1, y1, x2, y2)`` or None.
+        median_line: Median reference line as ``(x1, y1, x2, y2)`` or None.
+        image_height: Height of the processed image in pixels.
+        max_tolerated_center_shift_px: Horizontal shift at which the position
+            part of the score reaches zero.
+        max_tolerated_angle_deviation_deg: Tilt at which the angle part of the
+            score reaches zero.
 
     Returns:
         A tuple of (score in percent, center_x_diff in px, angle_diff in deg).
@@ -473,9 +484,8 @@ def calculate_temporal_line_score(
 
     # Tolerances at which a difference is considered a full mismatch (score 0
     # for that part). Smaller differences scale the score linearly.
-    max_tolerated_center_shift_px = 30.0  # horizontal shift of the line center
-    max_tolerated_angle_deviation_deg = 10.0  # tilt of the line
-
+    # Values match the ROS2 config (confidence_max_center_shift_px /
+    # confidence_max_angle_dev).
     pixel_part = max(0.0, 1.0 - center_x_diff / max_tolerated_center_shift_px)
     angle_part = max(
         0.0, 1.0 - angle_diff / max_tolerated_angle_deviation_deg

@@ -138,6 +138,10 @@ class CameraConfig:
     median_line_enabled: bool = True
     median_line_window_size: int = 15
     median_line_min_detections: int = 8
+    # Tolerances for the temporal confidence score: differences at or beyond
+    # these values score 0 for that part. Match the ROS2 config.
+    confidence_max_center_shift_px: float = 40.0
+    confidence_max_angle_dev: float = 20.0
 
     # Reference line parameters for deviation calculation and visualization.
     # The reference line is defined by an offset in pixels from the center of the image and an angle in degrees.
@@ -213,6 +217,11 @@ CONFIG_PARAMS: list[ParamDef] = [
              "int",   -200, 200, 1,  "{} px"),
     ParamDef("Line",      "Ref Angle",    "ref_angle_deg",
              "int",   0,   180, 1,    "{:.0f} deg"),
+    # ---- Confidence ----
+    ParamDef("Confidence", "Max Shift",   "confidence_max_center_shift_px",
+             "float", 0.0, 200.0, 1.0, "{:.0f} px"),
+    ParamDef("Confidence", "Max Angle",   "confidence_max_angle_dev",
+             "float", 0.0, 90.0, 1.0,  "{:.0f} deg"),
     # ---- ROI ----
     ParamDef("ROI",       "ROI On",       "roi_enabled",
              "bool",  0,   1,   1,    "{}"),
@@ -1155,6 +1164,8 @@ class RecordingAnalyzer:
             current_line=current_line,
             median_line=median_line,
             image_height=depth_work.shape[0],
+            max_tolerated_center_shift_px=config.confidence_max_center_shift_px,
+            max_tolerated_angle_deviation_deg=config.confidence_max_angle_dev,
         )
         cv2.circle(result_img, (center_x, center_y), radius=3,
                    color=current_color, thickness=-1)
