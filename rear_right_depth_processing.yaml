@@ -25,13 +25,13 @@ processing_config:
     window_size: 15
     min_detections: 8
   reference_line:
-    offset_x: -10
+    offset_x: 36
     angle_deg: 90
   roi:
     enabled: true
     x: 100
     y: 190
-    width: 700
+    width: 600
     height: 120
 
 sensors:
