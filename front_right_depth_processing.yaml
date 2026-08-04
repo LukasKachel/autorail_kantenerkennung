@@ -29,9 +29,9 @@ processing_config:
     angle_deg: 90
   roi:
     enabled: true
-    x: 80
+    x: 160
     y: 50
-    width: 750
+    width: 500
     height: 300
 
 sensors:

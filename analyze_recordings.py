@@ -9,6 +9,7 @@ import re
 
 import cv2
 import numpy as np
+import yaml
 
 from helpers import (
     apply_canny_edge_detection,
@@ -557,52 +558,140 @@ CAMERA_GRID = [
     ["rear_left", "rear_right"],
 ]
 
-# Tune camera-specific settings here. Positive offset_seconds moves that camera
-# later in the synchronized timeline; negative moves it earlier.
-CAMERA_CONFIGS: dict[str, CameraConfig] = {
-    "front_left": CameraConfig(
-        label="Front left",
-        folder="depth_front_left",
-        find_rightmost_line=False,
-        ref_offset_x=-6,
-        roi_enabled=True,
-        roi_x=80,
-        roi_y=50,
-        roi_width=750,
-        roi_height=300,
-        min_line_length=150,
-        max_line_gap=40,
-    ),
-    "front_right": CameraConfig(
-        label="Front right",
-        folder="depth_front_right",
-        find_rightmost_line=True,
-        ref_offset_x=-19,
-        roi_enabled=True,
-        roi_x=80,
-        roi_y=50,
-        roi_width=750,
-        roi_height=300,
-        min_line_length=150,
-        max_line_gap=40,
-    ),
-    "rear_left": CameraConfig(
-        label="Rear left",
-        folder="depth_rear_left",
-        find_rightmost_line=False,
-        ref_offset_x=-23,
-        roi_enabled=True,
-        roi_y=190,
-        roi_height=110,
-    ),
-    "rear_right": CameraConfig(
-        label="Rear right",
-        folder="depth_rear_right",
-        find_rightmost_line=True,
-        roi_y=190,
-        ref_offset_x=-10,
-    ),
+# Per-camera YAML config files (next to this script). These are the source of
+# truth for the processing pipeline; fields not present in the YAMLs (folder,
+# offset_seconds, confidence tolerances, info panel) keep the CameraConfig
+# defaults below.
+CAMERA_CONFIG_FILES: dict[str, str] = {
+    "front_left": "front_left_depth_processing.yaml",
+    "front_right": "front_right_depth_processing.yaml",
+    "rear_left": "rear_left_depth_processing.yaml",
+    "rear_right": "rear_right_depth_processing.yaml",
 }
+
+# Recording sub-directory per camera (not stored in the YAML files).
+CAMERA_FOLDERS: dict[str, str] = {
+    "front_left": "depth_front_left",
+    "front_right": "depth_front_right",
+    "rear_left": "depth_rear_left",
+    "rear_right": "depth_rear_right",
+}
+
+# Maps YAML ``processing_config`` section/key pairs to CameraConfig attributes.
+_YAML_TO_CONFIG: dict[tuple[str, str], str] = {
+    ("camera", "depth_scale"): "depth_scale",
+    ("processing", "depth_alpha"): "depth_alpha",
+    ("depth_cutoff", "enabled"): "depth_cutoff_enabled",
+    ("depth_cutoff", "min_depth_m"): "depth_cutoff_min_m",
+    ("depth_cutoff", "max_depth_m"): "depth_cutoff_max_m",
+    ("edge_detection", "canny_min_val"): "canny_min_val",
+    ("edge_detection", "canny_max_val"): "canny_max_val",
+    ("edge_detection", "dilation_size"): "dilate_size",
+    ("edge_detection", "min_line_length"): "min_line_length",
+    ("edge_detection", "max_line_gap"): "max_line_gap",
+    ("edge_detection", "hough_threshold"): "hough_threshold",
+    ("edge_detection", "right"): "find_rightmost_line",
+    ("median_line", "enabled"): "median_line_enabled",
+    ("median_line", "window_size"): "median_line_window_size",
+    ("median_line", "min_detections"): "median_line_min_detections",
+    ("reference_line", "offset_x"): "ref_offset_x",
+    ("reference_line", "angle_deg"): "ref_angle_deg",
+    ("roi", "enabled"): "roi_enabled",
+    ("roi", "x"): "roi_x",
+    ("roi", "y"): "roi_y",
+    ("roi", "width"): "roi_width",
+    ("roi", "height"): "roi_height",
+}
+
+# YAML camera-section keys that feed the module-level geometry constants.
+_YAML_GEOMETRY: dict[str, str] = {
+    "img_width": "IMG_WIDTH",
+    "img_height": "IMG_HEIGHT",
+    "fps": "FPS",
+    "hfov": "HFOV",
+    "vfov": "VFOV",
+}
+
+
+def _sensor_label(raw_config: dict, camera_key: str) -> str:
+    """Return the human-readable label from the YAML ``sensors`` list."""
+    sensors = raw_config.get("sensors")
+    if isinstance(sensors, list) and sensors and isinstance(sensors[0], dict):
+        name = sensors[0].get("name")
+        if name:
+            return str(name)
+    return camera_key.replace("_", " ").title()
+
+
+def load_camera_config(
+    camera_key: str,
+    config_path: Path,
+) -> tuple[CameraConfig, dict[str, object]]:
+    """Load one camera's processing config from its YAML file.
+
+    Values missing from the YAML keep the :class:`CameraConfig` defaults
+    (``folder``, ``offset_seconds``, confidence tolerances, info panel).
+    The camera-section geometry values are returned separately so the module
+    constants can be kept in sync with the YAML.
+    """
+    with config_path.open("r", encoding="utf-8") as config_file:
+        raw_config = yaml.safe_load(config_file) or {}
+    if not isinstance(raw_config, dict):
+        raise ValueError(f"{config_path}: config root must be a mapping")
+
+    processing = raw_config.get("processing_config") or {}
+    if not isinstance(processing, dict):
+        raise ValueError(f"{config_path}: processing_config must be a mapping")
+
+    values: dict[str, object] = {}
+    for (section, key), attr in _YAML_TO_CONFIG.items():
+        section_data = processing.get(section)
+        if isinstance(section_data, dict) and key in section_data:
+            values[attr] = section_data[key]
+
+    geometry: dict[str, object] = {}
+    camera = processing.get("camera")
+    if isinstance(camera, dict):
+        for yaml_key, const_name in _YAML_GEOMETRY.items():
+            if yaml_key in camera:
+                geometry[const_name] = camera[yaml_key]
+
+    config = CameraConfig(
+        label=_sensor_label(raw_config, camera_key),
+        folder=CAMERA_FOLDERS[camera_key],
+        **values,
+    )
+    return config, geometry
+
+
+def _apply_camera_geometry(geometry: dict[str, object]) -> None:
+    """Sync the module-level geometry constants from the YAML camera section."""
+    for const_name, value in geometry.items():
+        globals()[const_name] = value
+    if "IMG_WIDTH" in geometry and "HFOV" in geometry:
+        globals()["THETA_HORIZONTAL"] = HFOV / IMG_WIDTH
+    if "IMG_HEIGHT" in geometry and "VFOV" in geometry:
+        globals()["THETA_VERTICAL"] = VFOV / IMG_HEIGHT
+
+
+def load_camera_configs() -> dict[str, CameraConfig]:
+    """Load all four camera configs from the YAML files next to this script."""
+    config_dir = Path(__file__).resolve().parent
+    configs: dict[str, CameraConfig] = {}
+    geometry: dict[str, object] = {}
+    for camera_key, filename in CAMERA_CONFIG_FILES.items():
+        config_path = config_dir / filename
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Missing camera config file: {config_path}")
+        config, camera_geometry = load_camera_config(camera_key, config_path)
+        configs[camera_key] = config
+        geometry = camera_geometry or geometry
+    _apply_camera_geometry(geometry)
+    return configs
+
+
+CAMERA_CONFIGS = load_camera_configs()
 
 
 def frame_number(path: Path) -> int:
