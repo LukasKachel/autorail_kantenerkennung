@@ -21,6 +21,7 @@ from helpers import (
     draw_reference_line,
     filter_out_zero_boundaries,
     find_longest_line_right,
+    focal_length_from_fov,
     process_depth_image,
 )
 
@@ -408,8 +409,8 @@ def process_frame_pair(
     median_angle_deviation = median_horizontal_deviation = median_depth_at_center_y = None
     median_horizontal_deviation_mm = None
 
-    theta_horizontal = config.hfov / config.img_width
-    theta_vertical = config.vfov / config.img_height
+    focal_length_x = focal_length_from_fov(config.hfov, config.img_width)
+    focal_length_y = focal_length_from_fov(config.vfov, config.img_height)
 
     if current_line is not None:
         result_img = draw_long_line(result_img, *current_line)
@@ -428,8 +429,8 @@ def process_frame_pair(
         if detected_depth_at_center_y is not None:
             pixel_width, _, _ = calculate_pixel_area(
                 depth_in_mm=detected_depth_at_center_y,
-                theta_horizontal=theta_horizontal,
-                theta_vertical=theta_vertical,
+                focal_length_x=focal_length_x,
+                focal_length_y=focal_length_y,
             )
             horizontal_deviation_mm = horizontal_deviation * pixel_width
 
@@ -450,8 +451,8 @@ def process_frame_pair(
         if median_depth_at_center_y is not None:
             median_pixel_width, _, _ = calculate_pixel_area(
                 depth_in_mm=median_depth_at_center_y,
-                theta_horizontal=theta_horizontal,
-                theta_vertical=theta_vertical,
+                focal_length_x=focal_length_x,
+                focal_length_y=focal_length_y,
             )
             median_horizontal_deviation_mm = median_horizontal_deviation * median_pixel_width
 
@@ -462,8 +463,8 @@ def process_frame_pair(
 
     _, _, center_pixel_area = calculate_pixel_area(
         depth_in_mm=center_depth,
-        theta_horizontal=theta_horizontal,
-        theta_vertical=theta_vertical,
+        focal_length_x=focal_length_x,
+        focal_length_y=focal_length_y,
     )
 
     depth_tile = result_img

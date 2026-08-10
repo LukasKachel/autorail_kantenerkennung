@@ -330,12 +330,51 @@ def calculate_line_deviation(
     return angle_deviation, None, None
 
 
+def focal_length_from_fov(fov_deg: float, image_size_px: int) -> float:
+    """Convert a field-of-view angle to a pinhole focal length in pixels.
+
+    For a pinhole camera ``tan(fov / 2) = (image_size / 2) / focal_length``,
+    so ``focal_length = (image_size / 2) / tan(fov / 2)``.
+    """
+    return (image_size_px / 2) / math.tan(math.radians(fov_deg / 2))
+
+
 def calculate_pixel_area(
+    depth_in_mm: float,
+    focal_length_x: float,
+    focal_length_y: float,
+) -> tuple[float, float, float]:
+    """Calculate physical pixel width, height, and area at the given depth.
+
+    Uses the pinhole-camera relation ``pixel_size = depth / focal_length``:
+    a single pixel spans ``depth / fx`` mm horizontally and ``depth / fy`` mm
+    vertically at the measured depth. This is exact for the pinhole model and
+    replaces the FOV-average approximation used previously.
+
+    Args:
+        depth_in_mm: Depth from the camera in millimeters.
+        focal_length_x: Horizontal focal length in pixels (intrinsics ``fx``).
+        focal_length_y: Vertical focal length in pixels (intrinsics ``fy``).
+
+    Returns:
+        Tuple of ``(pixel_width, pixel_height, pixel_area)`` in millimeter units.
+    """
+    pixel_width = depth_in_mm / focal_length_x
+    pixel_height = depth_in_mm / focal_length_y
+    return pixel_width, pixel_height, pixel_width * pixel_height
+
+
+def calculate_pixel_area_fov(
     depth_in_mm: float,
     theta_horizontal: float,
     theta_vertical: float,
 ) -> tuple[float, float, float]:
-    """Calculate physical pixel width, height, and area at the given depth.
+    """Old FOV-average based pixel-area calculation (kept for comparison).
+
+    Approximates the angular size of one pixel as ``fov / image_size`` and
+    uses the chord ``2 * depth * tan(theta / 2)``. This underestimates the
+    exact pinhole result (``depth / focal_length``); see
+    :func:`calculate_pixel_area`.
 
     Args:
         depth_in_mm: Depth from the camera in millimeters.

@@ -23,6 +23,7 @@ from helpers import (
     draw_reference_line,
     filter_out_zero_boundaries,
     find_longest_line_right,
+    focal_length_from_fov,
     process_depth_image,
 )
 
@@ -34,8 +35,8 @@ IMG_WIDTH = 848
 IMG_HEIGHT = 480
 HFOV = 87
 VFOV = 58
-THETA_HORIZONTAL = HFOV / IMG_WIDTH
-THETA_VERTICAL = VFOV / IMG_HEIGHT
+FOCAL_LENGTH_X = focal_length_from_fov(HFOV, IMG_WIDTH)
+FOCAL_LENGTH_Y = focal_length_from_fov(VFOV, IMG_HEIGHT)
 DEFAULT_DEPTH_SCALE = 0.0010000000474974513
 
 
@@ -669,9 +670,9 @@ def _apply_camera_geometry(geometry: dict[str, object]) -> None:
     for const_name, value in geometry.items():
         globals()[const_name] = value
     if "IMG_WIDTH" in geometry and "HFOV" in geometry:
-        globals()["THETA_HORIZONTAL"] = HFOV / IMG_WIDTH
+        globals()["FOCAL_LENGTH_X"] = focal_length_from_fov(HFOV, IMG_WIDTH)
     if "IMG_HEIGHT" in geometry and "VFOV" in geometry:
-        globals()["THETA_VERTICAL"] = VFOV / IMG_HEIGHT
+        globals()["FOCAL_LENGTH_Y"] = focal_length_from_fov(VFOV, IMG_HEIGHT)
 
 
 def load_camera_configs() -> dict[str, CameraConfig]:
@@ -1213,8 +1214,8 @@ class RecordingAnalyzer:
                 if detected_depth_at_center_y is not None:
                     pixel_width, _, _ = calculate_pixel_area(
                         depth_in_mm=detected_depth_at_center_y,
-                        theta_horizontal=THETA_HORIZONTAL,
-                        theta_vertical=THETA_VERTICAL,
+                        focal_length_x=FOCAL_LENGTH_X,
+                        focal_length_y=FOCAL_LENGTH_Y,
                     )
                     horizontal_deviation_mm = horizontal_deviation * pixel_width
 
@@ -1237,8 +1238,8 @@ class RecordingAnalyzer:
                 if median_depth_at_center_y is not None:
                     median_pixel_width, _, _ = calculate_pixel_area(
                         depth_in_mm=median_depth_at_center_y,
-                        theta_horizontal=THETA_HORIZONTAL,
-                        theta_vertical=THETA_VERTICAL,
+                        focal_length_x=FOCAL_LENGTH_X,
+                        focal_length_y=FOCAL_LENGTH_Y,
                     )
                     median_horizontal_deviation_mm = (
                         median_horizontal_deviation * median_pixel_width
@@ -1260,8 +1261,8 @@ class RecordingAnalyzer:
                    color=current_color, thickness=-1)
         _, _, center_pixel_area = calculate_pixel_area(
             depth_in_mm=center_depth,
-            theta_horizontal=THETA_HORIZONTAL,
-            theta_vertical=THETA_VERTICAL,
+            focal_length_x=FOCAL_LENGTH_X,
+            focal_length_y=FOCAL_LENGTH_Y,
         )
 
         roi_str = (
