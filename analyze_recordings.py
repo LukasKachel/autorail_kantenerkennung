@@ -26,6 +26,12 @@ from helpers import (
     focal_length_from_fov,
     process_depth_image,
 )
+from navigation_preview import (
+    CameraNavigationSample,
+    NavigationMessage,
+    build_navigation_message,
+    render_navigation_panel,
+)
 
 
 FPS = 15.0
@@ -1149,7 +1155,7 @@ class RecordingAnalyzer:
         target_time: float,
         delta_ms: float,
         offsets: dict[str, float],
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, CameraNavigationSample]:
         """Render the full visualization tile for one camera.
 
         Produces a vertical stack of:
@@ -1160,7 +1166,8 @@ class RecordingAnalyzer:
            metrics (including the pixel and temporal confidence scores).
 
         Returns:
-            A BGR image suitable for arrangement in the overview grid.
+            The rendered BGR image and the median edge result used by the
+            navigation preview.
         """
         config = CAMERA_CONFIGS[camera_key]
         color_image = load_color(str(record.color_path)).copy()
@@ -1257,6 +1264,22 @@ class RecordingAnalyzer:
             max_tolerated_center_shift_px=config.confidence_max_center_shift_px,
             max_tolerated_angle_deviation_deg=config.confidence_max_angle_dev,
         )
+        navigation_sample = CameraNavigationSample(
+            timestamp_ms=int(round(camera_t * 1000.0)),
+            angle_deviation=(
+                float(median_angle_deviation)
+                if median_angle_deviation is not None else 0.0
+            ),
+            horizontal_deviation=(
+                float(median_horizontal_deviation_mm)
+                if median_horizontal_deviation_mm is not None else 0.0
+            ),
+            depth_at_edge=(
+                float(median_depth_at_center_y)
+                if median_depth_at_center_y is not None else 0.0
+            ),
+            confidence=float(temporal_score),
+        )
         cv2.circle(result_img, (center_x, center_y), radius=3,
                    color=current_color, thickness=-1)
         _, _, center_pixel_area = calculate_pixel_area(
@@ -1350,13 +1373,14 @@ class RecordingAnalyzer:
             width=max(image_pair.shape[1], config.info_panel_width),
             min_height=270,
         )
-        return vstack_padded([image_pair, info_panel], gap=0)
+        camera_panel = vstack_padded([image_pair, info_panel], gap=0)
+        return camera_panel, navigation_sample
 
     def render_overview_frame(
         self,
         target_time: float,
         offsets: dict[str, float] | None = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, NavigationMessage]:
         """Render the full four-camera grid for a single master time point.
 
         Arranges the four camera rows in a 2×2 grid (front row above,
@@ -1364,19 +1388,21 @@ class RecordingAnalyzer:
         overlap range.
 
         Returns:
-            A single BGR image combining all four cameras.
+            The combined four-camera image and the navigation message preview.
         """
         offsets = self.config_offsets() if offsets is None else offsets
         grid_rows = []
+        navigation_samples: dict[str, CameraNavigationSample] = {}
         for row_keys in CAMERA_GRID:
             row_panels = []
             for camera_key in row_keys:
                 record, delta_ms = self.nearest_record(
                     camera_key, target_time, offsets)
-                row_panels.append(
-                    self.render_camera_row(
-                        camera_key, record, target_time, delta_ms, offsets)
+                camera_panel, navigation_sample = self.render_camera_row(
+                    camera_key, record, target_time, delta_ms, offsets
                 )
+                row_panels.append(camera_panel)
+                navigation_samples[camera_key] = navigation_sample
             grid_rows.append(hstack_padded(row_panels, gap=12))
         body = vstack_padded(grid_rows, gap=12)
         start, end = self.common_time_bounds(offsets)
@@ -1401,7 +1427,12 @@ class RecordingAnalyzer:
             1,
             cv2.LINE_AA,
         )
-        return vstack_padded([header, body], gap=0)
+        overview = vstack_padded([header, body], gap=0)
+        navigation_message = build_navigation_message(
+            navigation_samples,
+            target_timestamp_ms=int(round(target_time * 1000.0)),
+        )
+        return overview, navigation_message
 
     def run_opencv_keyboard_viewer(
         self,
@@ -1467,6 +1498,10 @@ class RecordingAnalyzer:
         cv2.createTrackbar("master_frame", window_name,
                            state["frame"], max_frame, on_trackbar)
 
+        navigation_window_name = "Depth camera navigation"
+        cv2.namedWindow(navigation_window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(navigation_window_name, 720, 300)
+
         # ---- Config panel ----
         config_panel = ConfigPanel(
             "Config Panel", dirty_callback=lambda: state.update(dirty=True))
@@ -1485,7 +1520,9 @@ class RecordingAnalyzer:
                 if state["dirty"] or last_image is None:
                     target_time = self.master_time_for_frame(
                         state["frame"], offsets)
-                    overview = self.render_overview_frame(target_time, offsets)
+                    overview, navigation_message = self.render_overview_frame(
+                        target_time, offsets
+                    )
                     last_image = add_opencv_status_bar(
                         overview,
                         master_frame=state["frame"],
@@ -1508,6 +1545,10 @@ class RecordingAnalyzer:
                         window_name, f"{window_name} - frame {state['frame']}/{max_frame}"
                     )
                     cv2.imshow(window_name, last_image)
+                    cv2.imshow(
+                        navigation_window_name,
+                        render_navigation_panel(navigation_message),
+                    )
                     state["dirty"] = False
 
                 key = cv2.waitKeyEx(30)
@@ -1560,6 +1601,10 @@ class RecordingAnalyzer:
                     state["dirty"] = True
         finally:
             cv2.destroyWindow(window_name)
+            try:
+                cv2.destroyWindow(navigation_window_name)
+            except cv2.error:
+                pass
             config_panel.close()
 
 
