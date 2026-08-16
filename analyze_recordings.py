@@ -14,6 +14,7 @@ import yaml
 from helpers import (
     apply_canny_edge_detection,
     apply_depth_cutoff,
+    calculate_horizontal_deviation_mm,
     calculate_line_deviation,
     calculate_median_line,
     calculate_pixel_area,
@@ -39,9 +40,9 @@ FPS = 15.0
 # RealSense D435f values used for px/mm conversion.
 IMG_WIDTH = 848
 IMG_HEIGHT = 480
-HFOV = 87
-VFOV = 58
-FOCAL_LENGTH_X = focal_length_from_fov(HFOV, IMG_WIDTH)
+HFOV = 89.8
+VFOV = 58.8
+FOCAL_LENGTH_X = 425.6219
 FOCAL_LENGTH_Y = focal_length_from_fov(VFOV, IMG_HEIGHT)
 DEFAULT_DEPTH_SCALE = 0.0010000000474974513
 
@@ -63,6 +64,8 @@ class CameraConfig:
             later; negative values shift it earlier.
         depth_scale: Multiplier that converts raw depth units to meters
             (RealSense D435f default: ``0.001``).
+        focal_length_x: Horizontal focal length in pixels from the production
+            camera intrinsics.
         roi_enabled: When True, only a rectangular region of interest is
             processed instead of the full frame.
         roi_x: Left edge of the ROI in pixels (from the original frame).
@@ -107,6 +110,7 @@ class CameraConfig:
     folder: str
     offset_seconds: float = 0.0
     depth_scale: float = DEFAULT_DEPTH_SCALE
+    focal_length_x: float = FOCAL_LENGTH_X
 
     # ROI: Region Of Interest
     # Use a specified region of the original frame.
@@ -587,6 +591,7 @@ CAMERA_FOLDERS: dict[str, str] = {
 # Maps YAML ``processing_config`` section/key pairs to CameraConfig attributes.
 _YAML_TO_CONFIG: dict[tuple[str, str], str] = {
     ("camera", "depth_scale"): "depth_scale",
+    ("camera", "focal_length_x"): "focal_length_x",
     ("processing", "depth_alpha"): "depth_alpha",
     ("depth_cutoff", "enabled"): "depth_cutoff_enabled",
     ("depth_cutoff", "min_depth_m"): "depth_cutoff_min_m",
@@ -601,6 +606,8 @@ _YAML_TO_CONFIG: dict[tuple[str, str], str] = {
     ("median_line", "enabled"): "median_line_enabled",
     ("median_line", "window_size"): "median_line_window_size",
     ("median_line", "min_detections"): "median_line_min_detections",
+    ("median_line", "confidence_max_center_shift_px"): "confidence_max_center_shift_px",
+    ("median_line", "confidence_max_angle_dev"): "confidence_max_angle_dev",
     ("reference_line", "offset_x"): "ref_offset_x",
     ("reference_line", "angle_deg"): "ref_angle_deg",
     ("roi", "enabled"): "roi_enabled",
@@ -617,6 +624,7 @@ _YAML_GEOMETRY: dict[str, str] = {
     "fps": "FPS",
     "hfov": "HFOV",
     "vfov": "VFOV",
+    "focal_length_x": "FOCAL_LENGTH_X",
 }
 
 
@@ -675,7 +683,11 @@ def _apply_camera_geometry(geometry: dict[str, object]) -> None:
     """Sync the module-level geometry constants from the YAML camera section."""
     for const_name, value in geometry.items():
         globals()[const_name] = value
-    if "IMG_WIDTH" in geometry and "HFOV" in geometry:
+    if (
+        "FOCAL_LENGTH_X" not in geometry
+        and "IMG_WIDTH" in geometry
+        and "HFOV" in geometry
+    ):
         globals()["FOCAL_LENGTH_X"] = focal_length_from_fov(HFOV, IMG_WIDTH)
     if "IMG_HEIGHT" in geometry and "VFOV" in geometry:
         globals()["FOCAL_LENGTH_Y"] = focal_length_from_fov(VFOV, IMG_HEIGHT)
@@ -1219,12 +1231,15 @@ class RecordingAnalyzer:
             if angle_deviation is not None:
                 horizontal_deviation_mm = -1.0
                 if detected_depth_at_center_y is not None:
-                    pixel_width, _, _ = calculate_pixel_area(
-                        depth_in_mm=detected_depth_at_center_y,
-                        focal_length_x=FOCAL_LENGTH_X,
-                        focal_length_y=FOCAL_LENGTH_Y,
+                    horizontal_deviation_mm = calculate_horizontal_deviation_mm(
+                        horizontal_deviation_px=horizontal_deviation,
+                        depth_image=depth_work,
+                        ref_x_offset=config.ref_offset_x,
+                        depth_scale=config.depth_scale,
+                        focal_length_x=config.focal_length_x,
                     )
-                    horizontal_deviation_mm = horizontal_deviation * pixel_width
+                    if horizontal_deviation_mm is None:
+                        detected_depth_at_center_y = None
 
         if median_line is not None:
             result_img = draw_long_line(
@@ -1243,14 +1258,15 @@ class RecordingAnalyzer:
             if median_angle_deviation is not None:
                 median_horizontal_deviation_mm = -1.0
                 if median_depth_at_center_y is not None:
-                    median_pixel_width, _, _ = calculate_pixel_area(
-                        depth_in_mm=median_depth_at_center_y,
-                        focal_length_x=FOCAL_LENGTH_X,
-                        focal_length_y=FOCAL_LENGTH_Y,
+                    median_horizontal_deviation_mm = calculate_horizontal_deviation_mm(
+                        horizontal_deviation_px=median_horizontal_deviation,
+                        depth_image=depth_work,
+                        ref_x_offset=config.ref_offset_x,
+                        depth_scale=config.depth_scale,
+                        focal_length_x=config.focal_length_x,
                     )
-                    median_horizontal_deviation_mm = (
-                        median_horizontal_deviation * median_pixel_width
-                    )
+                    if median_horizontal_deviation_mm is None:
+                        median_depth_at_center_y = None
 
         h, w = depth_work.shape[:2]
         center_x, center_y = w // 2, h // 2
@@ -1283,8 +1299,8 @@ class RecordingAnalyzer:
         cv2.circle(result_img, (center_x, center_y), radius=3,
                    color=current_color, thickness=-1)
         _, _, center_pixel_area = calculate_pixel_area(
-            depth_in_mm=center_depth,
-            focal_length_x=FOCAL_LENGTH_X,
+            depth_in_mm=center_depth * config.depth_scale * 1000.0,
+            focal_length_x=config.focal_length_x,
             focal_length_y=FOCAL_LENGTH_Y,
         )
 

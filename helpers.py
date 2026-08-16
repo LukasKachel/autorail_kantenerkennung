@@ -330,6 +330,60 @@ def calculate_line_deviation(
     return angle_deviation, None, None
 
 
+def calculate_horizontal_deviation_mm(
+    horizontal_deviation_px: float | None,
+    depth_image: np.ndarray,
+    ref_x_offset: int,
+    depth_scale: float,
+    focal_length_x: float,
+) -> float | None:
+    """Convert a horizontal pixel deviation using the production calculation.
+
+    Each pixel between the reference line and detected edge contributes its
+    measured depth divided by the horizontal focal length. Missing depth values
+    are linearly interpolated from the valid values in that segment.
+    """
+    if horizontal_deviation_px is None:
+        return None
+
+    image_height, image_width = depth_image.shape[:2]
+    reference_x = image_width // 2 + ref_x_offset
+    detected_x = int(reference_x + horizontal_deviation_px)
+    if not 0 <= detected_x < image_width:
+        return None
+
+    reference_y = image_height // 2
+    start_column = min(reference_x, detected_x)
+    end_column = max(reference_x, detected_x)
+    row_depths = depth_image[reference_y, start_column:end_column]
+
+    if row_depths.size == 0:
+        return 0.0
+
+    sample_indices = np.arange(row_depths.size)
+    valid_mask = row_depths > 0
+    if not np.any(valid_mask):
+        return None
+
+    interpolated_depths = np.interp(
+        sample_indices,
+        sample_indices[valid_mask],
+        row_depths[valid_mask],
+    )
+    horizontal_deviation_mm = float(
+        (
+            interpolated_depths
+            * depth_scale
+            * 1000.0
+            / focal_length_x
+        ).sum()
+    )
+    if detected_x < reference_x:
+        horizontal_deviation_mm = -horizontal_deviation_mm
+
+    return horizontal_deviation_mm
+
+
 def focal_length_from_fov(fov_deg: float, image_size_px: int) -> float:
     """Convert a field-of-view angle to a pinhole focal length in pixels.
 

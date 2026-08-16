@@ -3,9 +3,10 @@ processing_config:
     img_width: 848
     img_height: 480
     fps: 15.0
-    hfov: 87
-    vfov: 58
+    hfov: 89.8
+    vfov: 58.8
     depth_scale: 0.0010000000474974513
+    focal_length_x: 425.6219
   processing:
     depth_alpha: 0.55
   depth_cutoff:
@@ -24,14 +25,16 @@ processing_config:
     enabled: true
     window_size: 15
     min_detections: 8
+    confidence_max_center_shift_px: 40.0
+    confidence_max_angle_dev: 20.0
   reference_line:
     offset_x: -19
     angle_deg: 90
   roi:
     enabled: true
-    x: 160
+    x: 80
     y: 50
-    width: 500
+    width: 750
     height: 300
 
 sensors:
