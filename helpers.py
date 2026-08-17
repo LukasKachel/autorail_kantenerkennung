@@ -29,7 +29,7 @@ def apply_depth_cutoff(
     max_depth_m: float = 1.0,
     enabled: bool = True,
 ) -> np.ndarray:
-    """Zero depth values outside the configured range (mind_depth_m).
+    """Zero out depth values outside the configured range (min_depth_m).
 
     Args:
         depth_image: Raw depth image whose values use the camera's depth units.
@@ -39,7 +39,7 @@ def apply_depth_cutoff(
         enabled: If false, return a copy of the input without filtering.
 
     Returns:
-        Copy of the depth image with out-of-range non-zero values set to zero.
+        A copy of the depth image with out-of-range non-zero values set to zero.
     """
     cutoff_image = depth_image.copy()
     if not enabled:
@@ -135,14 +135,16 @@ def find_longest_line_right(
     for line in hough_lines:
         x1, y1, x2, y2 = line[0]
         line_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        lines_with_length.append((line_length, (int(x1), int(y1), int(x2), int(y2))))
+        lines_with_length.append(
+            (line_length, (int(x1), int(y1), int(x2), int(y2))))
 
     longest_candidates = sorted(lines_with_length, reverse=True)[:4]
     if not longest_candidates:
         return None
 
-    key = lambda item: (item[1][0] + item[1][2]) / 2
-    selected = max(longest_candidates, key=key) if right else min(longest_candidates, key=key)
+    def key(item): return (item[1][0] + item[1][2]) / 2
+    selected = max(longest_candidates, key=key) if right else min(
+        longest_candidates, key=key)
     return selected[1]
 
 
@@ -240,7 +242,8 @@ def calculate_median_line(
     median_center_x = float(np.median(center_x_values))
     median_dx_dy = float(np.median(dx_dy_values))
     top_x = int(round(median_center_x - center_y * median_dx_dy))
-    bottom_x = int(round(median_center_x + (image_height - 1 - center_y) * median_dx_dy))
+    bottom_x = int(
+        round(median_center_x + (image_height - 1 - center_y) * median_dx_dy))
     return top_x, 0, bottom_x, image_height - 1
 
 
@@ -311,7 +314,8 @@ def calculate_line_deviation(
     if x2 != x1:
         m = (y2 - y1) / (x2 - x1)
         b = y1 - m * x1
-        detected_x_at_center_y = int((reference_y_at_center - b) / m) if m != 0 else x1
+        detected_x_at_center_y = int(
+            (reference_y_at_center - b) / m) if m != 0 else x1
     else:
         detected_x_at_center_y = x1
 
@@ -326,12 +330,105 @@ def calculate_line_deviation(
     return angle_deviation, None, None
 
 
+def calculate_horizontal_deviation_mm(
+    horizontal_deviation_px: float | None,
+    depth_image: np.ndarray,
+    ref_x_offset: int,
+    depth_scale: float,
+    focal_length_x: float,
+) -> float | None:
+    """Convert a horizontal pixel deviation using the production calculation.
+
+    Each pixel between the reference line and detected edge contributes its
+    measured depth divided by the horizontal focal length. Missing depth values
+    are linearly interpolated from the valid values in that segment.
+    """
+    if horizontal_deviation_px is None:
+        return None
+
+    image_height, image_width = depth_image.shape[:2]
+    reference_x = image_width // 2 + ref_x_offset
+    detected_x = int(reference_x + horizontal_deviation_px)
+    if not 0 <= detected_x < image_width:
+        return None
+
+    reference_y = image_height // 2
+    start_column = min(reference_x, detected_x)
+    end_column = max(reference_x, detected_x)
+    row_depths = depth_image[reference_y, start_column:end_column]
+
+    if row_depths.size == 0:
+        return 0.0
+
+    sample_indices = np.arange(row_depths.size)
+    valid_mask = row_depths > 0
+    if not np.any(valid_mask):
+        return None
+
+    interpolated_depths = np.interp(
+        sample_indices,
+        sample_indices[valid_mask],
+        row_depths[valid_mask],
+    )
+    horizontal_deviation_mm = float(
+        (
+            interpolated_depths
+            * depth_scale
+            * 1000.0
+            / focal_length_x
+        ).sum()
+    )
+    if detected_x < reference_x:
+        horizontal_deviation_mm = -horizontal_deviation_mm
+
+    return horizontal_deviation_mm
+
+
+def focal_length_from_fov(fov_deg: float, image_size_px: int) -> float:
+    """Convert a field-of-view angle to a pinhole focal length in pixels.
+
+    For a pinhole camera ``tan(fov / 2) = (image_size / 2) / focal_length``,
+    so ``focal_length = (image_size / 2) / tan(fov / 2)``.
+    """
+    return (image_size_px / 2) / math.tan(math.radians(fov_deg / 2))
+
+
 def calculate_pixel_area(
+    depth_in_mm: float,
+    focal_length_x: float,
+    focal_length_y: float,
+) -> tuple[float, float, float]:
+    """Calculate physical pixel width, height, and area at the given depth.
+
+    Uses the pinhole-camera relation ``pixel_size = depth / focal_length``:
+    a single pixel spans ``depth / fx`` mm horizontally and ``depth / fy`` mm
+    vertically at the measured depth. This is exact for the pinhole model and
+    replaces the FOV-average approximation used previously.
+
+    Args:
+        depth_in_mm: Depth from the camera in millimeters.
+        focal_length_x: Horizontal focal length in pixels (intrinsics ``fx``).
+        focal_length_y: Vertical focal length in pixels (intrinsics ``fy``).
+
+    Returns:
+        Tuple of ``(pixel_width, pixel_height, pixel_area)`` in millimeter units.
+    """
+    pixel_width = depth_in_mm / focal_length_x
+    pixel_height = depth_in_mm / focal_length_y
+    return pixel_width, pixel_height, pixel_width * pixel_height
+
+
+def calculate_pixel_area_fov(
     depth_in_mm: float,
     theta_horizontal: float,
     theta_vertical: float,
 ) -> tuple[float, float, float]:
-    """Calculate physical pixel width, height, and area at the given depth.
+    """Old FOV-average based pixel-area calculation (kept for comparison).
+
+    Approximates the angular size of one pixel as ``fov / image_size`` and
+    uses the chord ``2 * depth * tan(theta / 2)``. This underestimates the
+    exact pinhole result (``depth / focal_length``); see
+    :func:`calculate_pixel_area`.
 
     Args:
         depth_in_mm: Depth from the camera in millimeters.
@@ -416,3 +513,77 @@ def _find_min_depth_in_region(
                     min_depth = depth
 
     return 0.0 if min_depth == np.inf else float(min_depth)
+
+
+def _line_x_at_y(line, y):
+    """Return the x-position of the line at given y."""
+    x1, y1, x2, y2 = line
+    if y2 == y1:
+        return (x1 + x2) / 2.0
+    return x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+
+
+def calculate_pixel_validity_score(edge_depth):
+    """Compute the share of valid pixels in the depth image (after apply_depth_cutoff).
+
+    Returns:
+        A tuple of (score in percent, valid_pixels, total_pixels).
+    """
+    total_pixels = edge_depth.size
+    if total_pixels == 0:
+        return 0.0, 0, 0
+    valid_pixels = int(np.count_nonzero(edge_depth))
+    score = 100.0 * valid_pixels / total_pixels
+    return score, valid_pixels, total_pixels
+
+
+def calculate_temporal_line_score(
+    current_line,
+    median_line,
+    image_height,
+    max_tolerated_center_shift_px: float = 40.0,
+    max_tolerated_angle_deviation_deg: float = 20.0,
+):
+    """Compare the currently detected line with the median line.
+
+    Args:
+        current_line: Currently detected line as ``(x1, y1, x2, y2)`` or None.
+        median_line: Median reference line as ``(x1, y1, x2, y2)`` or None.
+        image_height: Height of the processed image in pixels.
+        max_tolerated_center_shift_px: Horizontal shift at which the position
+            part of the score reaches zero.
+        max_tolerated_angle_deviation_deg: Tilt at which the angle part of the
+            score reaches zero.
+
+    Returns:
+        A tuple of (score in percent, center_x_diff in px, angle_diff in deg).
+        The score is 0.0 if either line is missing (warm-up phase).
+    """
+    if current_line is None or median_line is None:
+        return 0.0, None, None
+
+    center_y = (image_height - 1) / 2.0
+
+    center_x_current = _line_x_at_y(current_line, center_y)
+    center_x_median = _line_x_at_y(median_line, center_y)
+    center_x_diff = abs(center_x_current - center_x_median)
+
+    ang_current = _calculate_line_angle_deviation(*current_line)
+    ang_median = _calculate_line_angle_deviation(*median_line)
+    raw_angle_diff = abs(ang_current - ang_median)
+    # a line has no direction, so orientations that differ by 180 degrees are
+    # equivalent. Account for the wrap at -90/90 degrees.
+    angle_diff = min(raw_angle_diff, 180.0 - raw_angle_diff)
+
+    # Tolerances at which a difference is considered a full mismatch (score 0
+    # for that part). Smaller differences scale the score linearly.
+    # Values match the ROS2 config (confidence_max_center_shift_px /
+    # confidence_max_angle_dev).
+    pixel_part = max(0.0, 1.0 - center_x_diff / max_tolerated_center_shift_px)
+    angle_part = max(
+        0.0, 1.0 - angle_diff / max_tolerated_angle_deviation_deg
+    )
+    # both parts contribute equally to the final score
+    score = 100.0 * (pixel_part + angle_part) / 2.0
+
+    return score, center_x_diff, angle_diff

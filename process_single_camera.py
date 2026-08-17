@@ -19,6 +19,7 @@ from helpers import (
     draw_reference_line,
     filter_out_zero_boundaries,
     find_longest_line_right,
+    focal_length_from_fov,
     process_depth_image,
 )
 
@@ -374,8 +375,8 @@ def render_frame(
     cv2.circle(result_img, (center_x, center_y), 3, current_color, -1)
     _, _, center_pixel_area = calculate_pixel_area(
         depth_in_mm=center_depth,
-        theta_horizontal=config.hfov / config.img_width,
-        theta_vertical=config.vfov / config.img_height,
+        focal_length_x=focal_length_from_fov(config.hfov, config.img_width),
+        focal_length_y=focal_length_from_fov(config.vfov, config.img_height),
     )
 
     processed_tile = result_img
@@ -437,8 +438,8 @@ def calculate_detection_metrics(
         if detected_depth is not None:
             pixel_width, _, _ = calculate_pixel_area(
                 depth_in_mm=detected_depth,
-                theta_horizontal=config.hfov / config.img_width,
-                theta_vertical=config.vfov / config.img_height,
+                focal_length_x=focal_length_from_fov(config.hfov, config.img_width),
+                focal_length_y=focal_length_from_fov(config.vfov, config.img_height),
             )
             horizontal_deviation_mm = horizontal_deviation * pixel_width
 

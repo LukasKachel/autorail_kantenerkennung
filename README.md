@@ -35,6 +35,19 @@ depth_rear_right/
 
 Each camera folder needs a `color/` folder with `color_*.png` files and a `depth/` folder with `depth_*.png` files.
 
+The viewer opens a separate **Depth camera navigation** window. It previews
+the `DepthCameraNavigation` content for the selected recording time by combining
+the median deviations from the two front cameras and the two rear cameras. The
+same confidence, timestamp-difference, angle-difference, and
+horizontal-difference thresholds as the ROS2 implementation are applied. The
+age check accepts the nearest recorded frame on either side of the selected
+time. The panel shows the configured 10 Hz / 100 ms output cycle; the offline
+preview itself is refreshed whenever the selected frame changes.
+
+The four `*_depth_processing.yaml` files mirror the current production camera
+intrinsics, ROIs, reference offsets, and line-selection settings. Horizontal
+deviation uses the same interpolated per-pixel depth sum as the ROS2 pipeline.
+
 ### Controls
 
 - Left/Right or A/D: move one frame
