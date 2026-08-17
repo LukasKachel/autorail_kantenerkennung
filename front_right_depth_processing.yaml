@@ -28,7 +28,7 @@ processing_config:
     confidence_max_center_shift_px: 40.0
     confidence_max_angle_dev: 20.0
   reference_line:
-    offset_x: -8
+    offset_x: -15
     angle_deg: 90
   roi:
     enabled: true

@@ -41,13 +41,13 @@ VERTICAL_LINE_PX = 100
 HORIZONTAL_LINE_PX = 100
 
 # Preferred stream profiles; the script falls back to the first supported one.
-DEPTH_PREFERRED = (848, 480, rs.format.z16, 15)
+DEPTH_PREFERRED = (848, 480, rs.format.z16, 30)
 DEPTH_FALLBACKS = [
     (848, 480, rs.format.z16, 30),
     (640, 480, rs.format.z16, 30),
     (640, 480, rs.format.z16, 15),
 ]
-COLOR_PREFERRED = (848, 480, rs.format.bgr8, 15)
+COLOR_PREFERRED = (848, 480, rs.format.bgr8, 30)
 COLOR_FALLBACKS = [
     (848, 480, rs.format.bgr8, 30),
     (640, 480, rs.format.bgr8, 30),
