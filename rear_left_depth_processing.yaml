@@ -8,14 +8,14 @@ processing_config:
     depth_scale: 0.0010000000474974513
     focal_length_x: 425.6219
   processing:
-    depth_alpha: 0.55
+    depth_alpha: 0.45
   depth_cutoff:
     enabled: true
     min_depth_m: 0.2
     max_depth_m: 1.0
   edge_detection:
-    canny_min_val: 130
-    canny_max_val: 150
+    canny_min_val: 20 #130
+    canny_max_val: 90 #150
     dilation_size: 1
     min_line_length: 50
     max_line_gap: 20
@@ -23,8 +23,8 @@ processing_config:
     right: false
   median_line:
     enabled: true
-    window_size: 15
-    min_detections: 8
+    window_size: 5
+    min_detections: 3
     confidence_max_center_shift_px: 40.0
     confidence_max_angle_dev: 20.0
   reference_line:
