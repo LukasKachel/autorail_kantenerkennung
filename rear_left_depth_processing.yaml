@@ -16,7 +16,7 @@ processing_config:
   edge_detection:
     canny_min_val: 20 #130
     canny_max_val: 90 #150
-    dilation_size: 1
+    dilation_size: 3
     min_line_length: 50
     max_line_gap: 20
     hough_threshold: 20
