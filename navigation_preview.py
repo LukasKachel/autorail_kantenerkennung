@@ -17,8 +17,8 @@ class NavigationConfig:
     min_confidence: float = 50.0
     max_sample_age_ms: int = 300
     max_pair_time_difference_ms: int = 150
-    max_angle_difference_deg: float = 5.0
-    max_horizontal_difference_mm: float = 100.0
+    max_angle_difference_deg: float = 8.0
+    max_horizontal_difference_mm: float = 150.0
 
 
 @dataclass(frozen=True)

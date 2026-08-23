@@ -24,6 +24,7 @@ from helpers import (
     draw_reference_line,
     filter_out_zero_boundaries,
     find_longest_line_right,
+    find_top_hough_lines,
     focal_length_from_fov,
     process_depth_image,
 )
@@ -569,6 +570,22 @@ CAMERA_GRID = [
     ["rear_left", "rear_right"],
 ]
 
+PIPELINE_STAGE_NAMES = (
+    "Raw depth",
+    "ROI depth",
+    "Depth cutoff",
+    "Visualized depth",
+    "Canny edges",
+    "Filtered edges",
+    "Detected Hough line",
+)
+
+PIPELINE_DEBUG_WIDTH = 1240
+PIPELINE_DEBUG_CONTROLS_HEIGHT = 126
+PIPELINE_DEBUG_CAMERA_Y = 10
+PIPELINE_DEBUG_CAMERA_HEIGHT = 28
+PIPELINE_DEBUG_STAGE_Y = 72
+
 # Per-camera YAML config files (next to this script). These are the source of
 # truth for the processing pipeline; fields not present in the YAMLs (folder,
 # offset_seconds, confidence tolerances, info panel) keep the CameraConfig
@@ -1046,12 +1063,13 @@ class RecordingAnalyzer:
 
         Returns:
             Tuple of ``(depth_work, applied_roi, edge_depth, depth_colormap,
-            filtered_edges)`` where:
+            canny_edges, filtered_edges)`` where:
 
             * *depth_work* — cropped (or full) depth array.
             * *applied_roi* — ROI as ``(x, y, w, h)`` or ``None``.
             * *edge_depth* — depth array after cutoff (used for pixel score).
             * *depth_colormap* — JET-coloured depth visualization (BGR).
+            * *canny_edges* — unfiltered binary output from Canny.
             * *filtered_edges* — binary edge image ready for Hough.
         """
         depth_work, applied_roi = self.crop_depth(depth_image, config)
@@ -1077,7 +1095,14 @@ class RecordingAnalyzer:
         filtered_edges = filter_out_zero_boundaries(
             canny_edges, edge_depth, dilate_size=config.dilate_size
         )
-        return depth_work, applied_roi, edge_depth, depth_colormap, filtered_edges
+        return (
+            depth_work,
+            applied_roi,
+            edge_depth,
+            depth_colormap,
+            canny_edges,
+            filtered_edges,
+        )
 
     def detect_line(
         self,
@@ -1101,7 +1126,7 @@ class RecordingAnalyzer:
 
         record = self.frame_by_number[camera_key][frame_index]
         depth_image = load_depth(str(record.depth_path))
-        _, _, _, _, filtered_edges = self.build_edge_inputs(
+        _, _, _, _, _, filtered_edges = self.build_edge_inputs(
             depth_image, config)
         line = find_longest_line_right(
             filtered_edges,
@@ -1114,6 +1139,113 @@ class RecordingAnalyzer:
             line = tuple(int(value) for value in line)
         self.current_line_cache[cache_key] = line
         return line
+
+    def render_pipeline_stage(
+        self,
+        camera_key: str,
+        record: FrameRecord,
+        stage_index: int,
+    ) -> np.ndarray:
+        """Render one selectable intermediate edge-detection image."""
+        config = CAMERA_CONFIGS[camera_key]
+        raw_depth = load_depth(str(record.depth_path))
+        (
+            depth_work,
+            applied_roi,
+            edge_depth,
+            depth_colormap,
+            canny_edges,
+            filtered_edges,
+        ) = self.build_edge_inputs(raw_depth, config)
+
+        stage_index = int(np.clip(stage_index, 0, len(PIPELINE_STAGE_NAMES) - 1))
+        grayscale_stages = (
+            cv2.convertScaleAbs(raw_depth, alpha=config.depth_alpha),
+            cv2.convertScaleAbs(depth_work, alpha=config.depth_alpha),
+            cv2.convertScaleAbs(edge_depth, alpha=config.depth_alpha),
+        )
+        stage_images = (
+            grayscale_stages[0],
+            grayscale_stages[1],
+            grayscale_stages[2],
+            depth_colormap,
+            canny_edges,
+            filtered_edges,
+        )
+
+        stage_note = ""
+        if stage_index < len(stage_images):
+            image = stage_images[stage_index].copy()
+        else:
+            image = cv2.cvtColor(filtered_edges, cv2.COLOR_GRAY2BGR)
+            top_lines = find_top_hough_lines(
+                filtered_edges,
+                min_line_length=config.min_line_length,
+                max_line_gap=config.max_line_gap,
+                threshold=config.hough_threshold,
+                limit=10,
+            )
+            candidate_color = (255, 100, 0)
+            for rank, (x1, y1, x2, y2) in enumerate(top_lines, start=1):
+                cv2.line(
+                    image,
+                    (x1, y1),
+                    (x2, y2),
+                    candidate_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                cv2.putText(
+                    image,
+                    str(rank),
+                    center,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    candidate_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+            line = self.detect_line(camera_key, record.frame_index)
+            if line is not None:
+                draw_long_line(image, *line, color=(0, 255, 255), thickness=2)
+            stage_note = (
+                f" | {len(top_lines)} blue candidates, yellow chosen"
+            )
+
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+        roi_text = (
+            f"ROI {applied_roi[0]},{applied_roi[1]} "
+            f"{applied_roi[2]}x{applied_roi[3]}"
+            if applied_roi is not None and stage_index > 0
+            else "full depth frame"
+        )
+        image_height = image.shape[0]
+        label_bar = np.zeros((66, image.shape[1], 3), dtype=np.uint8)
+        image = np.vstack((image, label_bar))
+        cv2.putText(
+            image,
+            f"{config.label} - {PIPELINE_STAGE_NAMES[stage_index]}",
+            (10, image_height + 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            f"frame {record.frame_index:06d} | {roi_text}{stage_note}",
+            (10, image_height + 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44 if stage_note else 0.50,
+            (170, 170, 170),
+            1,
+            cv2.LINE_AA,
+        )
+        return image
 
     def median_line_for_frame(
         self,
@@ -1184,9 +1316,14 @@ class RecordingAnalyzer:
         config = CAMERA_CONFIGS[camera_key]
         color_image = load_color(str(record.color_path)).copy()
         depth_image = load_depth(str(record.depth_path))
-        depth_work, applied_roi, edge_depth, depth_colormap, _ = self.build_edge_inputs(
-            depth_image, config
-        )
+        (
+            depth_work,
+            applied_roi,
+            edge_depth,
+            depth_colormap,
+            _,
+            _,
+        ) = self.build_edge_inputs(depth_image, config)
 
         if applied_roi is not None:
             x, y, width, height = applied_roi
@@ -1485,6 +1622,8 @@ class RecordingAnalyzer:
             "frame": int(np.clip(start_frame, 0, max_frame)),
             "dirty": True,
             "typed": "",
+            "debug_camera": 0,
+            "debug_stage": 0,
         }
 
         # Snapshot original config values so the user can reset with 'r'.
@@ -1517,6 +1656,32 @@ class RecordingAnalyzer:
         navigation_window_name = "Depth camera navigation"
         cv2.namedWindow(navigation_window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(navigation_window_name, 720, 300)
+
+        debug_window_name = "Edge pipeline debug"
+        cv2.namedWindow(debug_window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(debug_window_name, PIPELINE_DEBUG_WIDTH, 680)
+
+        def on_debug_mouse(
+            event: int,
+            x: int,
+            y: int,
+            _flags: int,
+            _param: object,
+        ) -> None:
+            if event != cv2.EVENT_LBUTTONDOWN:
+                return
+            debug_width = int(state.get("debug_width", PIPELINE_DEBUG_WIDTH))
+            camera_index, stage_index = pipeline_debug_hit_test(
+                x, y, debug_width
+            )
+            if camera_index is not None:
+                state["debug_camera"] = camera_index
+                state["dirty"] = True
+            if stage_index is not None:
+                state["debug_stage"] = stage_index
+                state["dirty"] = True
+
+        cv2.setMouseCallback(debug_window_name, on_debug_mouse)
 
         # ---- Config panel ----
         config_panel = ConfigPanel(
@@ -1565,6 +1730,27 @@ class RecordingAnalyzer:
                         navigation_window_name,
                         render_navigation_panel(navigation_message),
                     )
+                    debug_camera_key = CAMERA_ORDER[state["debug_camera"]]
+                    debug_record, _ = self.nearest_record(
+                        debug_camera_key, target_time, offsets
+                    )
+                    debug_stage_image = self.render_pipeline_stage(
+                        debug_camera_key,
+                        debug_record,
+                        state["debug_stage"],
+                    )
+                    debug_image = render_pipeline_debug_panel(
+                        debug_stage_image,
+                        selected_camera=state["debug_camera"],
+                        selected_stage=state["debug_stage"],
+                    )
+                    state["debug_width"] = debug_image.shape[1]
+                    cv2.setWindowTitle(
+                        debug_window_name,
+                        f"{debug_window_name} - {debug_camera_key} - "
+                        f"{PIPELINE_STAGE_NAMES[state['debug_stage']]}",
+                    )
+                    cv2.imshow(debug_window_name, debug_image)
                     state["dirty"] = False
 
                 key = cv2.waitKeyEx(30)
@@ -1621,7 +1807,170 @@ class RecordingAnalyzer:
                 cv2.destroyWindow(navigation_window_name)
             except cv2.error:
                 pass
+            try:
+                cv2.destroyWindow(debug_window_name)
+            except cv2.error:
+                pass
             config_panel.close()
+
+
+def _pipeline_debug_camera_bounds(width: int) -> list[tuple[int, int]]:
+    """Return centered x-bounds for the four debug-camera buttons."""
+    button_width = 150
+    gap = 10
+    total_width = (
+        len(CAMERA_ORDER) * button_width + (len(CAMERA_ORDER) - 1) * gap
+    )
+    start_x = (width - total_width) // 2
+    return [
+        (start_x + index * (button_width + gap), button_width)
+        for index in range(len(CAMERA_ORDER))
+    ]
+
+
+def _pipeline_debug_stage_positions(width: int) -> list[int]:
+    """Return evenly spaced, centered tick positions for pipeline stages."""
+    margin = 85
+    return [
+        int(round(position))
+        for position in np.linspace(
+            margin, width - margin, len(PIPELINE_STAGE_NAMES)
+        )
+    ]
+
+
+def pipeline_debug_hit_test(
+    x: int,
+    y: int,
+    width: int,
+) -> tuple[int | None, int | None]:
+    """Map a click in the debug panel to a camera button or stage tick."""
+    if PIPELINE_DEBUG_CAMERA_Y <= y < (
+        PIPELINE_DEBUG_CAMERA_Y + PIPELINE_DEBUG_CAMERA_HEIGHT
+    ):
+        for index, (button_x, button_width) in enumerate(
+            _pipeline_debug_camera_bounds(width)
+        ):
+            if button_x <= x < button_x + button_width:
+                return index, None
+
+    if PIPELINE_DEBUG_STAGE_Y - 18 <= y < PIPELINE_DEBUG_CONTROLS_HEIGHT:
+        positions = _pipeline_debug_stage_positions(width)
+        closest = min(
+            range(len(positions)), key=lambda index: abs(x - positions[index])
+        )
+        spacing = positions[1] - positions[0]
+        if abs(x - positions[closest]) <= spacing // 2:
+            return None, closest
+
+    return None, None
+
+
+def render_pipeline_debug_panel(
+    stage_image: np.ndarray,
+    selected_camera: int,
+    selected_stage: int,
+) -> np.ndarray:
+    """Center a stage image below labeled camera and pipeline selectors."""
+    width = max(PIPELINE_DEBUG_WIDTH, stage_image.shape[1] + 40)
+    content_height = max(IMG_HEIGHT + 66, stage_image.shape[0])
+    canvas = np.full(
+        (PIPELINE_DEBUG_CONTROLS_HEIGHT + content_height, width, 3),
+        20,
+        dtype=np.uint8,
+    )
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    for index, (button_x, button_width) in enumerate(
+        _pipeline_debug_camera_bounds(width)
+    ):
+        active = index == selected_camera
+        fill = (65, 145, 75) if active else (48, 48, 48)
+        border = (105, 215, 115) if active else (85, 85, 85)
+        cv2.rectangle(
+            canvas,
+            (button_x, PIPELINE_DEBUG_CAMERA_Y),
+            (
+                button_x + button_width,
+                PIPELINE_DEBUG_CAMERA_Y + PIPELINE_DEBUG_CAMERA_HEIGHT,
+            ),
+            fill,
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (button_x, PIPELINE_DEBUG_CAMERA_Y),
+            (
+                button_x + button_width,
+                PIPELINE_DEBUG_CAMERA_Y + PIPELINE_DEBUG_CAMERA_HEIGHT,
+            ),
+            border,
+            1,
+        )
+        label = CAMERA_ORDER[index].replace("_", " ").title()
+        text_width = cv2.getTextSize(label, font, 0.46, 1)[0][0]
+        cv2.putText(
+            canvas,
+            label,
+            (
+                button_x + (button_width - text_width) // 2,
+                PIPELINE_DEBUG_CAMERA_Y + 20,
+            ),
+            font,
+            0.46,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    positions = _pipeline_debug_stage_positions(width)
+    cv2.line(
+        canvas,
+        (positions[0], PIPELINE_DEBUG_STAGE_Y),
+        (positions[-1], PIPELINE_DEBUG_STAGE_Y),
+        (90, 90, 90),
+        3,
+        cv2.LINE_AA,
+    )
+    for index, (position, label) in enumerate(zip(positions, PIPELINE_STAGE_NAMES)):
+        active = index == selected_stage
+        color = (80, 190, 255) if active else (145, 145, 145)
+        cv2.circle(
+            canvas,
+            (position, PIPELINE_DEBUG_STAGE_Y),
+            9 if active else 5,
+            color,
+            -1,
+            cv2.LINE_AA,
+        )
+        text_width = cv2.getTextSize(label, font, 0.38, 1)[0][0]
+        cv2.putText(
+            canvas,
+            label,
+            (position - text_width // 2, PIPELINE_DEBUG_STAGE_Y + 31),
+            font,
+            0.38,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.line(
+        canvas,
+        (0, PIPELINE_DEBUG_CONTROLS_HEIGHT - 1),
+        (width, PIPELINE_DEBUG_CONTROLS_HEIGHT - 1),
+        (60, 60, 60),
+        1,
+    )
+    image_x = (width - stage_image.shape[1]) // 2
+    image_y = PIPELINE_DEBUG_CONTROLS_HEIGHT + (
+        content_height - stage_image.shape[0]
+    ) // 2
+    canvas[
+        image_y:image_y + stage_image.shape[0],
+        image_x:image_x + stage_image.shape[1],
+    ] = stage_image
+    return canvas
 
 
 def pad_to_height(

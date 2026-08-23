@@ -101,24 +101,27 @@ def filter_out_zero_boundaries(
     return cv2.bitwise_and(canny_edges, valid_region_mask)
 
 
-def find_longest_line_right(
+def find_top_hough_lines(
     edge_img: np.ndarray,
     min_line_length: int = 300,
     max_line_gap: int = 50,
     threshold: int = 50,
-    right: bool = True,
-) -> tuple[int, int, int, int] | None:
-    """Find the rightmost or leftmost line among the longest Hough candidates.
+    limit: int = 4,
+    sort_by: str = "consensus",
+) -> list[tuple[int, int, int, int]]:
+    """Return the best probabilistic-Hough line candidates in rank order.
 
     Args:
         edge_img: Binary edge image used as input for probabilistic Hough lines.
         min_line_length: Minimum accepted line length in pixels.
         max_line_gap: Maximum gap in pixels that can connect line segments.
         threshold: Minimum number of votes required for a line.
-        right: If true, select the rightmost candidate; otherwise select the leftmost.
+        limit: Maximum number of candidates to return.
+        sort_by: ``"consensus"`` ranks lines by agreement with the median line
+            of all candidates; ``"length"`` ranks by segment length.
 
     Returns:
-        Detected line as ``(x1, y1, x2, y2)``, or ``None`` if no line was found.
+        Lines as ``(x1, y1, x2, y2)`` tuples, best first.
     """
     hough_lines = cv2.HoughLinesP(
         image=edge_img,
@@ -129,23 +132,62 @@ def find_longest_line_right(
         maxLineGap=max_line_gap,
     )
     if hough_lines is None:
+        return []
+
+    candidates = [
+        (int(x1), int(y1), int(x2), int(y2)) for x1, y1, x2, y2 in hough_lines[:, 0]
+    ]
+
+    if sort_by == "length":
+        candidates.sort(
+            key=lambda line: (line[2] - line[0]) ** 2 + (line[3] - line[1]) ** 2,
+            reverse=True,
+        )
+        return candidates[:max(0, limit)]
+
+    normals = []
+    for x1, y1, x2, y2 in candidates:
+        theta = (math.atan2(y2 - y1, x2 - x1) + math.pi / 2) % math.pi
+        normals.append((theta, (x1, y1, x2, y2)))
+
+    sorted_thetas = sorted(theta for theta, _ in normals)
+    extended = sorted_thetas + [t + math.pi for t in sorted_thetas]
+    windows = [extended[i:i + len(sorted_thetas)] for i in range(len(sorted_thetas))]
+    best_window = min(windows, key=lambda w: w[-1] - w[0])
+    median_theta = best_window[len(best_window) // 2] % math.pi
+
+    def agreement(normal: tuple[float, tuple[int, int, int, int]]) -> float:
+        angle_diff = abs(normal[0] - median_theta)
+        return min(angle_diff, math.pi - angle_diff)
+
+    ranked = sorted(normals, key=agreement)
+    return [line for _, line in ranked[:max(0, limit)]]
+
+
+def find_longest_line_right(
+    edge_img: np.ndarray,
+    min_line_length: int = 300,
+    max_line_gap: int = 50,
+    threshold: int = 50,
+    right: bool = True,
+    sort_by: str = "consensus",
+) -> tuple[int, int, int, int] | None:
+    """Find the rightmost or leftmost line among the best candidates."""
+    top_candidates = find_top_hough_lines(
+        edge_img,
+        min_line_length=min_line_length,
+        max_line_gap=max_line_gap,
+        threshold=threshold,
+        limit=10,
+        sort_by=sort_by,
+    )
+    if not top_candidates:
         return None
 
-    lines_with_length = []
-    for line in hough_lines:
-        x1, y1, x2, y2 = line[0]
-        line_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-        lines_with_length.append(
-            (line_length, (int(x1), int(y1), int(x2), int(y2))))
-
-    longest_candidates = sorted(lines_with_length, reverse=True)[:4]
-    if not longest_candidates:
-        return None
-
-    def key(item): return (item[1][0] + item[1][2]) / 2
-    selected = max(longest_candidates, key=key) if right else min(
-        longest_candidates, key=key)
-    return selected[1]
+    def key(line): return (line[0] + line[2]) / 2
+    selected = max(top_candidates, key=key) if right else min(
+        top_candidates, key=key)
+    return selected
 
 
 def draw_long_line(
@@ -241,9 +283,8 @@ def calculate_median_line(
 
     median_center_x = float(np.median(center_x_values))
     median_dx_dy = float(np.median(dx_dy_values))
-    top_x = int(round(median_center_x - center_y * median_dx_dy))
-    bottom_x = int(
-        round(median_center_x + (image_height - 1 - center_y) * median_dx_dy))
+    top_x = round(median_center_x - center_y * median_dx_dy)
+    bottom_x = round(median_center_x + (image_height - 1 - center_y) * median_dx_dy)
     return top_x, 0, bottom_x, image_height - 1
 
 
